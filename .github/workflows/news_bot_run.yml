@@ -1,0 +1,55 @@
+name: Run Moldova News Bot
+
+on:
+  workflow_dispatch:
+  repository_dispatch:
+    types: [run-bot]
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    
+    environment: ${{ github.ref == 'refs/heads/main' && 'production' || 'staging' }}
+    
+    permissions:
+      contents: write 
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        cache: 'pip'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Run News Bot
+      env:
+        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
+        GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        ADMIN_CHAT_ID: ${{ secrets.ADMIN_CHAT_ID }}
+      run: python main.py
+
+    - name: Commit and push history and backlog state
+      run: |
+        git config --global user.name "github-actions[bot]"
+        git config --global user.email "github-actions[bot]@users.noreply.github.com"
+        
+        touch posted_news.txt posted_titles.txt news_backlog.json analytics.json
+        
+        git add posted_news.txt posted_titles.txt news_backlog.json analytics.json
+        
+        if ! git diff --staged --quiet; then
+          git commit -m "Update news history and backlog state [skip ci]"
+          git pull --rebase origin ${GITHUB_REF_NAME}
+          git push
+        else
+          echo "No changes in backlog or history to commit."
+        fi

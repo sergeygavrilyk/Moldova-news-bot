@@ -1,19 +1,22 @@
 import requests
 
 feeds = [
-  {"name": "Jutarnji List", "url": "https://www.jutarnji.hr/rss", "category": "Національні"},
-  {"name": "Večernji List", "url": "https://www.vecernji.hr/rss/vijesti-hrvatska", "category": "Національні"},
-  {"name": "Dnevnik.hr", "url": "https://dnevnik.hr/rss/feeds/vijesti.xml", "category": "Національні"},
-  {"name": "Nacional", "url": "https://www.nacional.hr/feed/", "category": "Національні"},
-  {"name": "HRT Vijesti", "url": "https://vijesti.hrt.hr/feed", "category": "Національні"},
-  {"name": "Net.hr", "url": "https://net.hr/feed/", "category": "Національні"},
-  {"name": "Tportal.hr", "url": "https://www.tportal.hr/rss/vijesti.xml", "category": "Національні"},
-  {"name": "Poslovni - Ekonomija", "url": "https://www.poslovni.hr/feed/gospodarstvo", "category": "Економіка"},
-  {"name": "ZADAR News", "url": "https://www.zadarnews.hr/rss/", "category": "Регіональні"},
-  {"name": "Zadarski List", "url": "https://www.novilist.hr/feed/?post_type=zadarski-list", "category": "Регіональні"},
-  {"name": "057info", "url": "https://www.057info.hr/feed/", "category": "Регіональні"},
-  {"name": "Slobodna Dalmacija", "url": "https://slobodnadalmacija.hr/feed", "category": "Регіональні"},
-  {"name": "Večernji List - Кримінал", "url": "https://www.vecernji.hr/rss/vijesti-crna-kronika", "category": "Надзвичайні події"}
+  {
+    "name": "Newsmaker",
+    "url": "https://newsmaker.md/feed/",
+    "category": "Регіональні"
+  },
+  {
+    "name": "IPN",
+    "url": "https://ipn.md/en/rss",
+    "category": "Регіональні"
+  },
+{
+    "name": "Point MD",
+    "url": "https://point.md/ru/rss/novosti/",
+    "category": "Регіональні"
+  }
+
 ]
 
 # Імітуємо запит від звичайного браузера

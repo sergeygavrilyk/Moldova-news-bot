@@ -4,8 +4,8 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "your_telegram_bot_token")
 CHANNEL_ID = os.getenv("CHANNEL_ID", "@your_channel_username")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "your_gemini_api_key")
 
-# Стоп-теми на рівні Python (фільтрація URL)
-PYTHON_STOP_WORDS = ["/sport/", "/promo/", "/horoskop/", "/entertainment/", "/lifestyle/"]
+# Стоп-теми та категорії на рівні Python (фільтрація URL)
+PYTHON_STOP_WORDS = ["/lume/", "/sport/", "/divertisment/", "/cultura/", "/horoscop/", "/lifestyle/"]
 
 # RSS-джерела Молдови
 RSS_FEEDS = [
