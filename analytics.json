@@ -26,5 +26,35 @@
         },
         "errors_count": 0,
         "gemini_retries": 3
+    },
+    {
+        "timestamp": "2026-09-11 10:32:40",
+        "execution_time": 199.6,
+        "funnel": {
+            "scraped_total": 35,
+            "rejected_by_keywords": 2,
+            "duplicates_removed_by_ai": 4
+        },
+        "backlog": {
+            "total_size": 43,
+            "sources": {
+                "Antena Zadar": 5,
+                "Zadarski list": 4,
+                "Newsmaker": 8,
+                "IPN": 10,
+                "Point MD": 16
+            }
+        },
+        "published": {
+            "total": 3,
+            "ukraine_priority": 0,
+            "with_images": 0,
+            "text_only": 3,
+            "sources": {
+                "Newsmaker": 3
+            }
+        },
+        "errors_count": 0,
+        "gemini_retries": 0
     }
 ]
