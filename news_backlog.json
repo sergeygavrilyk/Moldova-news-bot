@@ -1,5 +1,53 @@
 [
     {
+        "title": "В Молдове 52% жителей мерзли дома, но не включали отопление",
+        "description": "За последние шесть месяцев 62% жителей Молдовы отказывались от лечения из-за нехватки денег, 39% пропускали приемы пищи, а половина не могла обеспечить детям базовые потребности.",
+        "url": "https://point.md/ru/novosti/obschestvo/v-moldove-52-zhitelei-merzli-doma-no-ne-vkliuchali-otoplenie/",
+        "image_url": "https://i.simpalsmedia.com/point.md/news/600x315/eba9654d435c45ed83779b475f4ea7b8.jpg",
+        "source": "Point MD",
+        "timestamp": 1789147980
+    },
+    {
+        "title": "Спатарь: Если господин Ион с низкой пенсией будет есть яйца и курицу, его расходы уменьшатся",
+        "description": "Председатель парламентской комиссии по экономике, бюджету и финансам Марчел Спатарь считает, что молдаване с небольшими пенсиями смогут тратить меньше на продукты после вступления в силу новой налоговой политики на 2027 год.",
+        "url": "https://point.md/ru/novosti/ekonomika/spatar-esli-gospodin-ion-s-nizkoi-pensiei-budet-est-iaitsa-i-kuritsu-ego-raskhody-umen-shatsia/",
+        "image_url": "https://i.simpalsmedia.com/point.md/news/600x315/d7d27ad737b3f869de03996ec207dd95.jpg",
+        "source": "Point MD",
+        "timestamp": 1789147440
+    },
+    {
+        "title": "Гражданина Молдовы в Италии будут судить за домашнее насилие: держал семью в страхе годами",
+        "description": "В итальянском городе Гроссето карабинеры арестовали 26-летнего гражданина Молдовы по подозрению в систематическом домашнем насилии, побоях и грабеже в отношении своей 37-летней сожительницы, также являющейся уроженкой Молдовы.",
+        "url": "https://point.md/ru/novosti/proisshestviya/grazhdanina-moldovy-v-italii-budut-sudit-za-domashnee-nasilie-derzhal-sem-iu-v-strakhe-godami/",
+        "image_url": "https://i.simpalsmedia.com/point.md/news/600x315/3515faa675eb13202ddd694b01cdbb57.jpg",
+        "source": "Point MD",
+        "timestamp": 1789146540
+    },
+    {
+        "title": "В день допроса Андронаки оказался на лечении в Вене: адвокат принес справку на немецком",
+        "description": "Бывший депутат Владимир Андронаки не пришел на заседание суда 11 сентября, когда должен был дать показания по делу о мошенничестве и отмывании денег.",
+        "url": "https://point.md/ru/novosti/obschestvo/v-den-doprosa-andronaki-okazalsia-na-lechenii-v-vene-advokat-prines-spravku-na-nemetskom/",
+        "image_url": "https://i.simpalsmedia.com/point.md/news/600x315/a13b9fc2813960b8c1b86a144a22d453.jpg",
+        "source": "Point MD",
+        "timestamp": 1789145760
+    },
+    {
+        "title": "Еврокомиссар по обороне: Инцидент с самолетом Зеленского в Молдове показал риски для авиации",
+        "description": "Угроза для гражданской авиации в соседних с Украиной странах возрастает на фоне инцидентов с дронами РФ, заявил еврокомиссар по вопросам обороны и космоса Андрюс Кубилюс, комментируя ситуацию с самолетом Владимира Зеленского в РМ.",
+        "url": "https://point.md/ru/novosti/politika/evrokomissar-po-oborone-intsident-s-samoletom-zelenskogo-v-moldove-pokazal-riski-dlia-aviatsii/",
+        "image_url": "https://i.simpalsmedia.com/point.md/news/600x315/55f38523566b7e8ec1e544094b995f18.jpg",
+        "source": "Point MD",
+        "timestamp": 1789145520
+    },
+    {
+        "title": "Полиция расследует инцидент с израильтянами, которым отказали в посадке на автобус",
+        "description": "Полиция Молдовы начала проверку после инцидента с тремя гражданами Израиля, которым, по их словам, отказали в посадке на автобус Кишинёв—Одесса и оскорбили их по антисемитским мотивам.",
+        "url": "https://point.md/ru/novosti/obschestvo/politsiia-rassleduet-intsident-s-izrail-tianami-kotorym-otkazali-v-posadke-na-avtobus/",
+        "image_url": "https://i.simpalsmedia.com/point.md/news/600x315/ad2bc94836f0e0f199d2922c414ebc6c.jpg",
+        "source": "Point MD",
+        "timestamp": 1789144800
+    },
+    {
         "title": "Более 1 100 случаев за четыре дня: в Молдове растет число респираторных инфекций",
         "description": "В период с 7 по 10 сентября было зарегистрировано 1 129 случаев острых инфекций верхних дыхательных путей — в 2,1 раза больше по сравнению с периодом с 31 августа по 3 сентября 2026 года, когда было зарегистрировано 548 случаев.",
         "url": "https://point.md/ru/novosti/obschestvo/bolee-1-100-sluchaev-za-chetyre-dnia-v-moldove-rastet-chislo-respiratornykh-infektsii/",
@@ -62,14 +110,6 @@
         "image_url": null,
         "source": "Newsmaker",
         "timestamp": 1789133418
-    },
-    {
-        "title": "Пожар в Бельцах: спасателям пришлось эвакуировать людей через окно",
-        "description": "<p>В жилом многоэтажном доме в Бельцах 11 сентября вспыхнул пожар. Спасателям пришлось эвакуировать семью с ребенком — люди оказались заблокированы в квартире на четвертом этаже. По данным Генинспектората чрезвычайных ситуаций, в результате пожара пострадал один человек. В&#160;инспекторате рассказали, что получив сообщение о&#160;пожаре отправили на&#160;место три пожарных расчета. К&#160;моменту прибытия пожарных огонь полностью охватил квартиру на&#160;четвертом этаже, а&#160;пламя уже перекинулось на&#160;балкон квартиры этажом выше. Эвакуировать [&#8230;]</p>\n<p>The post <a href=\"https://newsmaker.md/ru/pojar-v-belczah-spasatelyam-prishlos-evakuirovat-lyudei-cherez-okno\">Пожар в Бельцах: спасателям пришлось эвакуировать людей через окно</a> appeared first on <a href=\"https://newsmaker.md/ru\">NewsMaker</a>.</p>",
-        "url": "https://newsmaker.md/ru/pojar-v-belczah-spasatelyam-prishlos-evakuirovat-lyudei-cherez-okno",
-        "image_url": null,
-        "source": "Newsmaker",
-        "timestamp": 1789133205
     },
     {
         "title": "The Houthi rebels in Yemen have taken control of the Bab el-Mandeb Strait",
@@ -198,45 +238,5 @@
         "image_url": "https://i.simpalsmedia.com/point.md/news/600x315/0303e120fbb4b54470330d4e46eb803c.jpg",
         "source": "Point MD",
         "timestamp": 1789125420
-    },
-    {
-        "title": "Карпа обвинили в угрозах Костюку и его семье: Не переходите красные линии",
-        "description": "Депутаты партии «Демократия дома» обвинили депутата ПДС Лилиана Карпа в угрозах Василию Костюку и членам его семьи. Об этом они сообщили утром 11 сентября во время брифинга в парламенте.",
-        "url": "https://point.md/ru/novosti/politika/karpa-obvinili-v-ugrozakh-kostiuku-i-ego-sem-e-ne-perekhodite-krasnye-linii/",
-        "image_url": "https://i.simpalsmedia.com/point.md/news/600x315/1183f9aad3c326ee075e580cbea5749c.jpg",
-        "source": "Point MD",
-        "timestamp": 1789125060
-    },
-    {
-        "title": "Week in Brief – IPN Newsletter",
-        "description": "<p>Retrospective of the week 7-13 September. The most important news from the IPN feed A drone exploded in the Rascani district The airspace of the Republic of Moldova was temporarily&#8230;</p>\n<p>The post <a href=\"https://ipn.md/en/week-in-brief-ipn-newsletter-37/\">Week in Brief – IPN Newsletter</a> appeared first on <a href=\"https://ipn.md/en/\">ipn.md</a>.</p>",
-        "url": "https://ipn.md/en/week-in-brief-ipn-newsletter-37/",
-        "image_url": null,
-        "source": "IPN",
-        "timestamp": 1789124400
-    },
-    {
-        "title": "Зеленский об инциденте в Молдове: Самолет не находился в воздухе одновременно с дроном",
-        "description": "Отдельные инциденты не представляют стратегической угрозы, заявил Владимир Зеленский.",
-        "url": "https://point.md/ru/novosti/politika/zelenskii-ob-intsidente-v-moldove-samolet-ne-nakhodilsia-v-vozdukhe-odnovremenno-s-dronom/",
-        "image_url": "https://i.simpalsmedia.com/point.md/news/600x315/2e496a27c7f217a17359b19f177cfe42.jpg",
-        "source": "Point MD",
-        "timestamp": 1789123980
-    },
-    {
-        "title": "В Молдове снова подскочат цены на бензин и дизтопливо? НАРЭ объясняет новое подорожание",
-        "description": "<p>С 12 сентября стоимость литра дизельного топлива в Молдове вырастет до 34,46 леев, а бензина А-95 — до 33,04 леев за литр. Национальное агентство регулирования в энергетике (НАРЭ) 11 сентября установило новые цены, согласно которым бензин подорожает на 27 банов, а дизельное топливо — сразу на 60 банов. В&#160;НАРЭ пояснили, что молдавский рынок остро реагирует на&#160;резкое ухудшение ситуации на&#160;международных биржах. Особенно на&#160;рост цен повлияло обострение конфликта на&#160;Ближнем Востоке, создавшее серьезные риски [&#8230;]</p>\n<p>The post <a href=\"https://newsmaker.md/ru/v-moldove-snova-podskochat-czeny-na-benzin-i-diztoplivo-nare-obyasnyaet-novoe-podorojanie\">В Молдове снова подскочат цены на бензин и дизтопливо? НАРЭ объясняет новое подорожание</a> appeared first on <a href=\"https://newsmaker.md/ru\">NewsMaker</a>.</p>",
-        "url": "https://newsmaker.md/ru/v-moldove-snova-podskochat-czeny-na-benzin-i-diztoplivo-nare-obyasnyaet-novoe-podorojanie",
-        "image_url": null,
-        "source": "Newsmaker",
-        "timestamp": 1789123460
-    },
-    {
-        "title": "(ВИДЕО) «Где деньги?»: Молдавские блогеры будут искать проекты ЕС по всей стране",
-        "description": "<p>Молдавские блогеры и артисты отправятся по стране, чтобы показать жителям регионов, куда тратятся европейские деньги. Информационный центр ЕС Europe Café запустил кампанию «Где деньги?». Акцент сделают не на цифрах, а на реальных историях людей. Участники до последнего не знают, какие проекты им предстоит посетить. В каждом районе они получат конверт с подсказками. Контентмейкеры проедут по [&#8230;]</p>\n<p>The post <a href=\"https://newsmaker.md/ru/gde-dengi-moldavskie-blogery-budut-iskat-proekty-es\">(ВИДЕО) «Где деньги?»: Молдавские блогеры будут искать проекты ЕС по всей стране</a> appeared first on <a href=\"https://newsmaker.md/ru\">NewsMaker</a>.</p>",
-        "url": "https://newsmaker.md/ru/gde-dengi-moldavskie-blogery-budut-iskat-proekty-es",
-        "image_url": null,
-        "source": "Newsmaker",
-        "timestamp": 1789122742
     }
 ]
