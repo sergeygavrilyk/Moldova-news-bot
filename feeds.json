@@ -1,0 +1,17 @@
+[
+  {
+    "name": "Newsmaker",
+    "url": "https://newsmaker.md/feed/",
+    "category": "Регіональні"
+  },
+  {
+    "name": "IPN",
+    "url": "https://ipn.md/en/rss",
+    "category": "Регіональні"
+  },
+{
+    "name": "Point MD",
+    "url": "https://point.md/ru/rss/novosti/",
+    "category": "Регіональні"
+  }
+]
