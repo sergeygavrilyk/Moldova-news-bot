@@ -231,7 +231,7 @@ def deduplicate_news(client, articles, history_titles=None):
     for attempt in range(max_retries):
         try:
             response = client.models.generate_content(
-                model='gemini-2.5-flash', 
+                model='gemini-3.6-flash', 
                 contents=prompt,
                 config={"response_mime_type": "application/json"}
             )
@@ -424,7 +424,7 @@ def process_backlog(stats=None):
 
     for attempt in range(3):
         try:
-            response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
+            response = client.models.generate_content(model='gemini-3.6-flash', contents=prompt)
             generated_texts = [t.strip() for t in response.text.strip().split('|||') if t.strip()]
             break
         except Exception as e:
