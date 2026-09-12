@@ -448,7 +448,6 @@ def process_backlog(stats=None):
             time.sleep(60)
             
     if not generated_texts: 
-        if not generated_texts: 
         logging.error("❌ Не вдалося згенерувати тексти після 3 спроб. Скасування публікації.")
         if stats is not None: stats["errors_count"] += 1  # ДОДАНО
         return
