@@ -171,7 +171,7 @@ def get_source_name(url):
 def is_quality_article(title, description, url):
     # Адаптовано під румунськомовні/російськомовні категорії молдовських сайтів
     unwanted_url_categories = [
-        '/lume/', '/sport/', '/divertisment/', '/cultura/', 
+        '/lume/', '/sport/', '/divertisment/',  
         '/lifestyle/', '/magazin/', '/showbiz/', '/horoscop/', '/fun/'
     ]
     url_lower = url.lower()
@@ -204,7 +204,7 @@ def deduplicate_news(client, articles, history_titles=None):
         
     logging.info("Аналіз на дублікати (включно з історією) через Gemini...")
     
-    recent_history = history_titles[-15:] if history_titles else []
+    recent_history = history_titles[-25:] if history_titles else []
 prompt_data = [{"id": i, "title": a["title"], "description": a.get("description", "")} for i, a in enumerate(articles)]
     
     prompt = f"""
