@@ -205,7 +205,7 @@ def deduplicate_news(client, articles, history_titles=None):
     logging.info("Аналіз на дублікати (включно з історією) через Gemini...")
     
     recent_history = history_titles[-25:] if history_titles else []
-prompt_data = [{"id": i, "title": a["title"], "description": a.get("description", "")} for i, a in enumerate(articles)]
+    prompt_data = [{"id": i, "title": a["title"], "description": a.get("description", "")} for i, a in enumerate(articles)]
     
     prompt = f"""
     Ось список новин (ID, Заголовок), які претендують на публікацію:
