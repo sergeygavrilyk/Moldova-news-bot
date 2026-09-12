@@ -205,7 +205,7 @@ def deduplicate_news(client, articles, history_titles=None):
     logging.info("Аналіз на дублікати (включно з історією) через Gemini...")
     
     recent_history = history_titles[-15:] if history_titles else []
-    prompt_data = [{"id": i, "title": a["title"]} for i, a in enumerate(articles)]
+prompt_data = [{"id": i, "title": a["title"], "description": a.get("description", "")} for i, a in enumerate(articles)]
     
     prompt = f"""
     Ось список новин (ID, Заголовок), які претендують на публікацію:
@@ -377,11 +377,14 @@ def process_backlog(stats=None):
             if item.get('source') == src and item['url'] not in used_urls:
                 candidate_batch.append(item)
                 used_urls.add(item['url'])
-            if len(candidate_batch) >= 15: break
-        if len(candidate_batch) >= 15: break
+            if len(candidate_batch) >= 25: break
+        if len(candidate_batch) >= 25: break
             
-    candidate_batch = candidate_batch[:15]
+    candidate_batch = candidate_batch[:25]
     if not candidate_batch: return
+
+    # 1. Запам'ятовуємо всі URL, які пішли на оцінку до Gemini
+    evaluated_urls = {item['url'] for item in candidate_batch}
 
     history_titles = load_history(TITLES_FILE)
     len_before = len(candidate_batch)
@@ -463,9 +466,10 @@ def process_backlog(stats=None):
                 
             time.sleep(45)
 
-    remaining_backlog = [item for item in backlog if item['url'] not in successful_urls]
+    # 2. Залишаємо тільки ті новини, які ще взагалі НЕ розглядалися ШІ
+    remaining_backlog = [item for item in backlog if item['url'] not in evaluated_urls]
     remaining_backlog.sort(key=lambda x: x.get('timestamp', 0), reverse=True)
-    save_backlog(remaining_backlog[:30])
+    save_backlog(remaining_backlog[:50])
 
 def send_to_telegram(text, url, source_name, image_url=None):
     crop_msg = "...\n\n👉 <i>Повні деталі читайте за посиланням нижче</i> 👇"
