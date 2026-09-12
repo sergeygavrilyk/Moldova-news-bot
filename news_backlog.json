@@ -1,242 +1,26 @@
 [
     {
-        "title": "В Молдове 52% жителей мерзли дома, но не включали отопление",
-        "description": "За последние шесть месяцев 62% жителей Молдовы отказывались от лечения из-за нехватки денег, 39% пропускали приемы пищи, а половина не могла обеспечить детям базовые потребности.",
-        "url": "https://point.md/ru/novosti/obschestvo/v-moldove-52-zhitelei-merzli-doma-no-ne-vkliuchali-otoplenie/",
-        "image_url": "https://i.simpalsmedia.com/point.md/news/600x315/eba9654d435c45ed83779b475f4ea7b8.jpg",
+        "title": "Отопление может подорожать для жителей Новых Анен, Комрата и части Кишинева",
+        "description": "Несколько поставщиков, обеспечивающих теплом жителей Новых Анен, Комрата и части Кишинева, просят повысить тарифы на тепловую энергию. Запрашиваемое повышение составляет от 25,68% до 72,13%.",
+        "url": "https://point.md/ru/novosti/ekonomika/otoplenie-mozhet-podorozhat-dlia-zhitelei-novykh-anen-komrata-i-chasti-kishineva/",
+        "image_url": "https://i.simpalsmedia.com/point.md/news/600x315/5b1da37b877df9c6553a2150f2116983.jpg",
         "source": "Point MD",
-        "timestamp": 1789147980
+        "timestamp": 1789189920
     },
     {
-        "title": "Спатарь: Если господин Ион с низкой пенсией будет есть яйца и курицу, его расходы уменьшатся",
-        "description": "Председатель парламентской комиссии по экономике, бюджету и финансам Марчел Спатарь считает, что молдаване с небольшими пенсиями смогут тратить меньше на продукты после вступления в силу новой налоговой политики на 2027 год.",
-        "url": "https://point.md/ru/novosti/ekonomika/spatar-esli-gospodin-ion-s-nizkoi-pensiei-budet-est-iaitsa-i-kuritsu-ego-raskhody-umen-shatsia/",
-        "image_url": "https://i.simpalsmedia.com/point.md/news/600x315/d7d27ad737b3f869de03996ec207dd95.jpg",
-        "source": "Point MD",
-        "timestamp": 1789147440
-    },
-    {
-        "title": "Гражданина Молдовы в Италии будут судить за домашнее насилие: держал семью в страхе годами",
-        "description": "В итальянском городе Гроссето карабинеры арестовали 26-летнего гражданина Молдовы по подозрению в систематическом домашнем насилии, побоях и грабеже в отношении своей 37-летней сожительницы, также являющейся уроженкой Молдовы.",
-        "url": "https://point.md/ru/novosti/proisshestviya/grazhdanina-moldovy-v-italii-budut-sudit-za-domashnee-nasilie-derzhal-sem-iu-v-strakhe-godami/",
-        "image_url": "https://i.simpalsmedia.com/point.md/news/600x315/3515faa675eb13202ddd694b01cdbb57.jpg",
-        "source": "Point MD",
-        "timestamp": 1789146540
-    },
-    {
-        "title": "В день допроса Андронаки оказался на лечении в Вене: адвокат принес справку на немецком",
-        "description": "Бывший депутат Владимир Андронаки не пришел на заседание суда 11 сентября, когда должен был дать показания по делу о мошенничестве и отмывании денег.",
-        "url": "https://point.md/ru/novosti/obschestvo/v-den-doprosa-andronaki-okazalsia-na-lechenii-v-vene-advokat-prines-spravku-na-nemetskom/",
-        "image_url": "https://i.simpalsmedia.com/point.md/news/600x315/a13b9fc2813960b8c1b86a144a22d453.jpg",
-        "source": "Point MD",
-        "timestamp": 1789145760
-    },
-    {
-        "title": "Еврокомиссар по обороне: Инцидент с самолетом Зеленского в Молдове показал риски для авиации",
-        "description": "Угроза для гражданской авиации в соседних с Украиной странах возрастает на фоне инцидентов с дронами РФ, заявил еврокомиссар по вопросам обороны и космоса Андрюс Кубилюс, комментируя ситуацию с самолетом Владимира Зеленского в РМ.",
-        "url": "https://point.md/ru/novosti/politika/evrokomissar-po-oborone-intsident-s-samoletom-zelenskogo-v-moldove-pokazal-riski-dlia-aviatsii/",
-        "image_url": "https://i.simpalsmedia.com/point.md/news/600x315/55f38523566b7e8ec1e544094b995f18.jpg",
-        "source": "Point MD",
-        "timestamp": 1789145520
-    },
-    {
-        "title": "Полиция расследует инцидент с израильтянами, которым отказали в посадке на автобус",
-        "description": "Полиция Молдовы начала проверку после инцидента с тремя гражданами Израиля, которым, по их словам, отказали в посадке на автобус Кишинёв—Одесса и оскорбили их по антисемитским мотивам.",
-        "url": "https://point.md/ru/novosti/obschestvo/politsiia-rassleduet-intsident-s-izrail-tianami-kotorym-otkazali-v-posadke-na-avtobus/",
-        "image_url": "https://i.simpalsmedia.com/point.md/news/600x315/ad2bc94836f0e0f199d2922c414ebc6c.jpg",
-        "source": "Point MD",
-        "timestamp": 1789144800
-    },
-    {
-        "title": "Более 1 100 случаев за четыре дня: в Молдове растет число респираторных инфекций",
-        "description": "В период с 7 по 10 сентября было зарегистрировано 1 129 случаев острых инфекций верхних дыхательных путей — в 2,1 раза больше по сравнению с периодом с 31 августа по 3 сентября 2026 года, когда было зарегистрировано 548 случаев.",
-        "url": "https://point.md/ru/novosti/obschestvo/bolee-1-100-sluchaev-za-chetyre-dnia-v-moldove-rastet-chislo-respiratornykh-infektsii/",
-        "image_url": "https://i.simpalsmedia.com/point.md/news/600x315/12efea273fe3d2bcd505e16d4535ac86.jpg",
-        "source": "Point MD",
-        "timestamp": 1789141860
-    },
-    {
-        "title": "IPN | Cultural Agenda | September 12",
-        "description": "<p>The actors of the Planeta Clounella Theater are performing the children&#8217;s show &#8220;Snow White&#8221; (September 12-13) /Odeon Cultural Center /11:00 AM/. The premiere of the music festival &#8220;Ready fest&#8221; takes&#8230;</p>\n<p>The post <a href=\"https://ipn.md/en/ipn-cultural-agenda-september-12-2/\">IPN | Cultural Agenda | September 12</a> appeared first on <a href=\"https://ipn.md/en/\">ipn.md</a>.</p>",
-        "url": "https://ipn.md/en/ipn-cultural-agenda-september-12-2/",
+        "title": "Hydrological warning: the water flow remains low on most of the country’s rivers",
+        "description": "<p>The water flow remains low on most rivers in the country. The Authority for Meteorology and Environmental Monitoring has issued an orange code warning for the Nistru river and two&#8230;</p>\n<p>The post <a href=\"https://ipn.md/en/hydrological-warning-the-water-flow-remains-low-on-most-of-the-countrys-rivers/\">Hydrological warning: the water flow remains low on most of the country&#8217;s rivers</a> appeared first on <a href=\"https://ipn.md/en/\">ipn.md</a>.</p>",
+        "url": "https://ipn.md/en/hydrological-warning-the-water-flow-remains-low-on-most-of-the-countrys-rivers/",
         "image_url": null,
         "source": "IPN",
-        "timestamp": 1789140600
+        "timestamp": 1789189200
     },
     {
-        "title": "Agenda of events for Saturday, September 12",
-        "description": "<p>The &#8220;Moldova Youth Forum&#8221;, 5th edition is being organized (September 12-13). The event is attended by President Maia Sandu /Guesthouse in Holercani, Dubasari district /10:00 PM/. The seniors from the&#8230;</p>\n<p>The post <a href=\"https://ipn.md/en/agenda-of-events-for-saturday-september-12/\">Agenda of events for Saturday, September 12</a> appeared first on <a href=\"https://ipn.md/en/\">ipn.md</a>.</p>",
-        "url": "https://ipn.md/en/agenda-of-events-for-saturday-september-12/",
-        "image_url": null,
-        "source": "IPN",
-        "timestamp": 1789138800
-    },
-    {
-        "title": "Платон из Лондона призвал власти Молдовы \"остановить законотворческий зуд\"",
-        "description": "Вячеслав Платон, скрывающийся от правосудия в Лондоне, раскритиковал намерение спикера Игоря Гросу принять до конца года около 270 европейских законов в рамках гармонизации отечественного и европейского законодательства.",
-        "url": "https://point.md/ru/novosti/politika/platon-iz-londona-prizval-vlasti-moldovy-ostanovit-zakonotvorcheskii-zud/",
-        "image_url": "https://i.simpalsmedia.com/point.md/news/600x315/f446c6384f97175a7042e8549e6acd5e.jpg",
+        "title": "Белоус о налоге на посылки с Temu и Shein: Людям не придется идти на таможню",
+        "description": "Посылки стоимостью до 150 евро, заказанные жителями РМ на зарубежных онлайн-платформах, таких как Temu, Shein, с 1 октября 2026 года будут облагаться НДС в размере 20%, а также сбором за обработку в размере 12 леев за  посылку.",
+        "url": "https://point.md/ru/novosti/ekonomika/belous-o-naloge-na-posylki-s-temu-i-shein-liudiam-ne-pridetsia-idti-na-tamozhniu/",
+        "image_url": "https://i.simpalsmedia.com/point.md/news/600x315/b6dcf0ce75f45f4e43498adece333ec3.jpg",
         "source": "Point MD",
-        "timestamp": 1789137360
-    },
-    {
-        "title": "Hadja Lahbib: Moldova’s solidarity in crises demonstrates that it is a reliable partner for the EU",
-        "description": "<p>The Republic of Moldova has already demonstrated that it is a reliable partner for the European Union, including through the solidarity shown in crisis management and participation in European civil&#8230;</p>\n<p>The post <a href=\"https://ipn.md/en/hadja-lahbib-moldovas-solidarity-in-crises-demonstrates-that-it-is-a-reliable-partner-for-the-eu/\">Hadja Lahbib: Moldova&#8217;s solidarity in crises demonstrates that it is a reliable partner for the EU</a> appeared first on <a href=\"https://ipn.md/en/\">ipn.md</a>.</p>",
-        "url": "https://ipn.md/en/hadja-lahbib-moldovas-solidarity-in-crises-demonstrates-that-it-is-a-reliable-partner-for-the-eu/",
-        "image_url": null,
-        "source": "IPN",
-        "timestamp": 1789137340
-    },
-    {
-        "title": "Ukrainian drones have hit a Russian chemical plant in the Perm region, 1,500 kilometers from the border",
-        "description": "<p>Ukrainian drones have struck a chemical plant in the Russian region of Perm, located 1,500 kilometers from the border with Ukraine. It is one of the largest producers of nitrogen-based&#8230;</p>\n<p>The post <a href=\"https://ipn.md/en/ukrainian-drones-have-hit-a-russian-chemical-plant-in-the-perm-region-1500-kilometers-from-the-border/\">Ukrainian drones have hit a Russian chemical plant in the Perm region, 1,500 kilometers from the border</a> appeared first on <a href=\"https://ipn.md/en/\">ipn.md</a>.</p>",
-        "url": "https://ipn.md/en/ukrainian-drones-have-hit-a-russian-chemical-plant-in-the-perm-region-1500-kilometers-from-the-border/",
-        "image_url": null,
-        "source": "IPN",
-        "timestamp": 1789136440
-    },
-    {
-        "title": "Спатарь о том, где брать деньги на компенсации: С богатых, игроков и курящих",
-        "description": "Марчел Спатарь заявил, что для выплаты компенсаций уязвимым гражданам на отопление власти должны собирать деньги с состоятельных людей, а также с тех, кто «играет в азартные игры, курит, кто будет в Новый год взрывать фейерверки».",
-        "url": "https://point.md/ru/novosti/obschestvo/spatar-o-tom-gde-brat-den-gi-na-kompensatsii-s-bogatykh-igrokov-i-kuriashchikh/",
-        "image_url": "https://i.simpalsmedia.com/point.md/news/600x315/b1f2e0b6735118fe63212dc32074d313.jpg",
-        "source": "Point MD",
-        "timestamp": 1789135440
-    },
-    {
-        "title": "Платона будут судить за схему с акциями Moldova-Agroindbank",
-        "description": "<p>Антикоррупционная прокуратура 11 сентября объявила о завершении расследования и передаче в суд дела, в котором бизнесмена Вячеслава Платона обвиняют в незаконном присвоении чужого имущества путем обмана, причинении особо крупного ущерба акционерам банка Moldova-Agroindbank, а также в отмывании денег в особо крупных размерах. В частности, Платона обвиняют в создании и руководстве незаконной схемой, с помощью которой он стремился получить пакет акций банка и продвинуть лояльных лиц в органы управления банка. Согласно обвинению, [&#8230;]</p>\n<p>The post <a href=\"https://newsmaker.md/ru/platona-budut-sudit-za-shemu-s-akcziyami-moldova-agroindbank\">Платона будут судить за схему с акциями Moldova-Agroindbank</a> appeared first on <a href=\"https://newsmaker.md/ru\">NewsMaker</a>.</p>",
-        "url": "https://newsmaker.md/ru/platona-budut-sudit-za-shemu-s-akcziyami-moldova-agroindbank",
-        "image_url": null,
-        "source": "Newsmaker",
-        "timestamp": 1789133418
-    },
-    {
-        "title": "The Houthi rebels in Yemen have taken control of the Bab el-Mandeb Strait",
-        "description": "<p>The Houthi rebels in Yemen took full control of the Bab el-Mandeb strait on Friday, which connects the Gulf of Aden and the Red Sea. The offensive comes a day&#8230;</p>\n<p>The post <a href=\"https://ipn.md/en/the-houthi-rebels-in-yemen-have-taken-control-of-the-bab-el-mandeb-strait/\">The Houthi rebels in Yemen have taken control of the Bab el-Mandeb Strait</a> appeared first on <a href=\"https://ipn.md/en/\">ipn.md</a>.</p>",
-        "url": "https://ipn.md/en/the-houthi-rebels-in-yemen-have-taken-control-of-the-bab-el-mandeb-strait/",
-        "image_url": null,
-        "source": "IPN",
-        "timestamp": 1789132939
-    },
-    {
-        "title": "Дело Платона передали в суд",
-        "description": "Антикоррупционная прокуратура завершила расследование и передала в суд дело Вячеслава Платона о незаконном получении 43,11% акций Moldova Agroindbank стоимостью более 400 миллионов леев.",
-        "url": "https://point.md/ru/novosti/obschestvo/delo-platona-peredali-v-sud/",
-        "image_url": "https://i.simpalsmedia.com/point.md/news/600x315/04c16f776142afc7654ff4327d51b50b.jpg",
-        "source": "Point MD",
-        "timestamp": 1789132620
-    },
-    {
-        "title": "Депутат: Дополнительный сбор в размере 48 банов за топливо не будет ощущаться",
-        "description": "Депутат от PAS Дориан Истратий считает, что дополнительный сбор в размере 48 банов за каждый литр бензина и дизельного топлива «не будет ощущаться» на фоне колебаний цен на топливо.",
-        "url": "https://point.md/ru/novosti/obschestvo/deputat-dopolnitel-nyi-sbor-v-razmere-48-banov-za-toplivo-ne-budet-oshchushchat-sia/",
-        "image_url": "https://i.simpalsmedia.com/point.md/news/600x315/74dc33b321ed0bccc3ed28ac2112ed13.jpg",
-        "source": "Point MD",
-        "timestamp": 1789131600
-    },
-    {
-        "title": "Fire in a residential building in Balti. A man suffered burns",
-        "description": "<p>A man was taken to the hospital following a fire in a residential building in Balti. According to the firefighters, the flames engulfed an apartment on the fourth floor and&#8230;</p>\n<p>The post <a href=\"https://ipn.md/en/fire-in-a-residential-building-in-balti-a-man-suffered-burns/\">Fire in a residential building in Balti. A man suffered burns</a> appeared first on <a href=\"https://ipn.md/en/\">ipn.md</a>.</p>",
-        "url": "https://ipn.md/en/fire-in-a-residential-building-in-balti-a-man-suffered-burns/",
-        "image_url": null,
-        "source": "IPN",
-        "timestamp": 1789131110
-    },
-    {
-        "title": "НБМ: Финансовое положение банков стабильно, прибыль за полугодие выросла почти на 15%",
-        "description": "Банковский сектор Молдовы демонстрирует устойчивость и рост кредитования на середину 2026 года.",
-        "url": "https://point.md/ru/novosti/ekonomika/nbm-finansovoe-polozhenie-bankov-stabil-no-pribyl-za-polugodie-vyrosla-pochti-na-15/",
-        "image_url": "https://i.simpalsmedia.com/point.md/news/600x315/a70cf0f512805806e3ff57ec4b49791c.jpg",
-        "source": "Point MD",
-        "timestamp": 1789130940
-    },
-    {
-        "title": "The AIPA employee investigated for influence peddling, transferred to house arrest",
-        "description": "<p>The head of the department within the Agency for Intervention and Payments for Agriculture, detained at the beginning of August in a case of influence trafficking, has been transferred to&#8230;</p>\n<p>The post <a href=\"https://ipn.md/en/the-aipa-employee-investigated-for-influence-peddling-transferred-to-house-arrest/\">The AIPA employee investigated for influence peddling, transferred to house arrest</a> appeared first on <a href=\"https://ipn.md/en/\">ipn.md</a>.</p>",
-        "url": "https://ipn.md/en/the-aipa-employee-investigated-for-influence-peddling-transferred-to-house-arrest/",
-        "image_url": null,
-        "source": "IPN",
-        "timestamp": 1789130646
-    },
-    {
-        "title": "Молдова получила 1,4 млрд евро внешней помощи в 2025 году",
-        "description": "Большая часть средств была направлена на развитие энергетики, экономики и образования.",
-        "url": "https://point.md/ru/novosti/ekonomika/moldova-poluchila-1-4-mlrd-evro-vneshnei-pomoshchi-v-2025-godu/",
-        "image_url": "https://i.simpalsmedia.com/point.md/news/600x315/f893077b6e654da921ea0b2088c6f601.jpg",
-        "source": "Point MD",
-        "timestamp": 1789129440
-    },
-    {
-        "title": "Moldova defeats Germany in beach soccer and climbs to third place in Group A",
-        "description": "<p>Moldova&#8217;s national team defeated Germany, with a score of 5-4 after overtime, in the third match of the Beach Soccer European Championship Superfinal. This is the tricolor&#8217;s first victory in&#8230;</p>\n<p>The post <a href=\"https://ipn.md/en/moldova-defeats-germany-in-beach-soccer-and-climbs-to-third-place-in-group-a/\">Moldova defeats Germany in beach soccer and climbs to third place in Group A</a> appeared first on <a href=\"https://ipn.md/en/\">ipn.md</a>.</p>",
-        "url": "https://ipn.md/en/moldova-defeats-germany-in-beach-soccer-and-climbs-to-third-place-in-group-a/",
-        "image_url": null,
-        "source": "IPN",
-        "timestamp": 1789129294
-    },
-    {
-        "title": "Звезда мема Om uspeșnîi может остаться без прав на фразу: заявку подала другая фирма",
-        "description": "Фраза «Om uspeșnîi» не была зарегистрирована главной героиней этого мема. По крайней мере, об этом свидетельствуют открытые данные Агентства по интеллектуальной собственности (AGEPI).",
-        "url": "https://point.md/ru/novosti/obschestvo/zvezda-mema-om-uspesnii-mozhet-ostat-sia-bez-prav-na-frazu-zaiavku-podala-drugaia-firma/",
-        "image_url": "https://i.simpalsmedia.com/point.md/news/600x315/4afe689c3cd97217a3a98f41646b9048.jpg",
-        "source": "Point MD",
-        "timestamp": 1789128360
-    },
-    {
-        "title": "The EU definitively approves Ukraine’s use of 6.1 billion euros for the purchase of missiles for the Patriot systems",
-        "description": "<p>The European Commission has definitively approved the 6.1 billion euro package for Ukraine&#8217;s military acquisitions, from the 90 billion euro loan. Thus, Ukraine will be able to use the money&#8230;</p>\n<p>The post <a href=\"https://ipn.md/en/the-eu-definitively-approves-ukraines-use-of-6-1-billion-euros-for-the-purchase-of-missiles-for-the-patriot-systems/\">The EU definitively approves Ukraine&#8217;s use of 6.1 billion euros for the purchase of missiles for the Patriot systems</a> appeared first on <a href=\"https://ipn.md/en/\">ipn.md</a>.</p>",
-        "url": "https://ipn.md/en/the-eu-definitively-approves-ukraines-use-of-6-1-billion-euros-for-the-purchase-of-missiles-for-the-patriot-systems/",
-        "image_url": null,
-        "source": "IPN",
-        "timestamp": 1789128249
-    },
-    {
-        "title": "Гросу: Сейчас вступление в ЕС скорее вопрос безопасности, нежели экономического благополучия",
-        "description": "При этом лидер PAS и председатель парламента Игорь Гросу заявил, что цель подписать договор о вступлении в ЕС до 2028 года «остается в силе».",
-        "url": "https://point.md/ru/novosti/politika/grosu-seichas-vstuplenie-v-es-skoree-vopros-bezopasnosti-nezheli-ekonomicheskogo-blagopoluchiia/",
-        "image_url": "https://i.simpalsmedia.com/point.md/news/600x315/da6cc361dab3954fa4b556e5cf349196.jpg",
-        "source": "Point MD",
-        "timestamp": 1789128000
-    },
-    {
-        "title": "Maia Sandu and Péter Magyar discuss the expansion of economic relations between Moldova and Hungary",
-        "description": "<p>The expansion of trade exchanges between the Republic of Moldova and Hungary, as well as the European path, were discussed by President Maia Sandu and the Prime Minister of Hungary,&#8230;</p>\n<p>The post <a href=\"https://ipn.md/en/maia-sandu-and-peter-magyar-discuss-the-expansion-of-economic-relations-between-moldova-and-hungary/\">Maia Sandu and Péter Magyar discuss the expansion of economic relations between Moldova and Hungary</a> appeared first on <a href=\"https://ipn.md/en/\">ipn.md</a>.</p>",
-        "url": "https://ipn.md/en/maia-sandu-and-peter-magyar-discuss-the-expansion-of-economic-relations-between-moldova-and-hungary/",
-        "image_url": null,
-        "source": "IPN",
-        "timestamp": 1789127815
-    },
-    {
-        "title": "Новая автомагистраль в Румынии ускорит поездки из Молдовы в Бухарест",
-        "description": "Строительство автомагистрали Молдовы в Румынии меняет время поездки на восток страны и может напрямую повлиять на Республику Молдова, сократив продолжительность поездок до Ясс и далее до Кишинева.",
-        "url": "https://point.md/ru/novosti/obschestvo/novaia-avtomagistral-v-rumynii-uskorit-poezdki-iz-moldovy-v-bukharest/",
-        "image_url": "https://i.simpalsmedia.com/point.md/news/600x315/15cb0dc6942dea0ae8735703d8daed87.jpg",
-        "source": "Point MD",
-        "timestamp": 1789127280
-    },
-    {
-        "title": "The price of oil remains above 100 dollars per barrel amid the war in Iran",
-        "description": "<p>The price of oil remains above the threshold of 100 dollars per barrel, reached for the first time in almost four months, amid escalating tensions in the Middle East. On&#8230;</p>\n<p>The post <a href=\"https://ipn.md/en/the-price-of-oil-remains-above-100-dollars-per-barrel-amid-the-war-in-iran/\">The price of oil remains above 100 dollars per barrel amid the war in Iran</a> appeared first on <a href=\"https://ipn.md/en/\">ipn.md</a>.</p>",
-        "url": "https://ipn.md/en/the-price-of-oil-remains-above-100-dollars-per-barrel-amid-the-war-in-iran/",
-        "image_url": null,
-        "source": "IPN",
-        "timestamp": 1789125929
-    },
-    {
-        "title": "Спатарь: \"Цены не вырастут на 20%. Возможно, на 1-2%\"",
-        "description": "Председатель парламентской комиссии по экономике, бюджету и финансам Марчел Спатарь заявил, что более высокий НДС не приведет к пропорциональному росту цен, в том числе на сельскохозяйственную продукцию.",
-        "url": "https://point.md/ru/novosti/ekonomika/spatar-tseny-ne-vyrastut-na-20-vozmozhno-na-1-2/",
-        "image_url": "https://i.simpalsmedia.com/point.md/news/600x315/c01a971bb76755517799dab9eb65f5ad.jpg",
-        "source": "Point MD",
-        "timestamp": 1789125840
-    },
-    {
-        "title": "В Молдове акциз на пиво поднимут на 10%",
-        "description": "Пиво не освобождено от акцизов, а в налоговой политике на 2027 год предусмотрено повышение акциза на него на 10%, как и на другие алкогольные напитки.",
-        "url": "https://point.md/ru/novosti/ekonomika/v-moldove-aktsiz-na-pivo-podnimut-na-10/",
-        "image_url": "https://i.simpalsmedia.com/point.md/news/600x315/0303e120fbb4b54470330d4e46eb803c.jpg",
-        "source": "Point MD",
-        "timestamp": 1789125420
+        "timestamp": 1789189200
     }
 ]
