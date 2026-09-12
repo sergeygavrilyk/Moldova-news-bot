@@ -448,7 +448,9 @@ def process_backlog(stats=None):
             time.sleep(60)
             
     if not generated_texts: 
+        if not generated_texts: 
         logging.error("❌ Не вдалося згенерувати тексти після 3 спроб. Скасування публікації.")
+        if stats is not None: stats["errors_count"] += 1  # ДОДАНО
         return
 
     history_urls = load_history(HISTORY_FILE)
@@ -479,6 +481,9 @@ def process_backlog(stats=None):
                 stats["published"]["sources"][src] = stats["published"]["sources"].get(src, 0) + 1
                 
             time.sleep(45)
+        else:
+            # ДОДАНО: Фіксуємо помилку, якщо Telegram не прийняв текст
+            if stats is not None: stats["errors_count"] += 1
 
     # 2. Залишаємо тільки ті новини, які ще взагалі НЕ розглядалися ШІ
     remaining_backlog = [item for item in backlog if item['url'] not in evaluated_urls]
