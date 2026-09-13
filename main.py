@@ -129,7 +129,7 @@ def send_analytics_to_admin(stats):
         f"▪️ Знайдено в RSS: {stats['funnel']['scraped_total']}\n"
         f"▪️ Відсіяно фільтрами (код): {stats['funnel']['rejected_by_keywords']}\n"
         f"▪️ Відсіяно Gemini (дублі/історія): {stats['funnel']['duplicates_removed_by_ai']}\n\n"
-        f"📥 <b>Беклог (в черзі {stats['backlog']['total_size']}):</b>\n"
+        f"📥 <b>Беклог (очікують ШІ-валідації: {stats['backlog']['total_size']}):</b>\n"
         f"▪️ {backlog_src_str}\n\n"
         f"✅ <b>Опубліковано: {stats['published']['total']}</b>\n"
         f"▪️ Формат: З фото ({stats['published']['with_images']}) | Текст ({stats['published']['text_only']})\n"
@@ -341,10 +341,13 @@ def process_backlog(stats=None):
     backlog = load_backlog()
     if not backlog: return
 
+    # Очищений Regex-список для Молдови (румунські та російські маркери)
     ukraine_keywords = [
-        'ucraina', 'ucrainean', 'ucraineana', 'kiev', 'zelenski', 'odessa', 
-        'refugiat', 'protectie temporara', 'ajutor umanitar', 'razboi', 'conflict', 
-        'agresiune', 'ukrajin', 'zelensk', 'kijev'
+        # Румунською
+        r'\bucrain', r'\bzelenski', r'\bkiev', r'\bkiiv', r'\bodesa', r'\bodessa',
+        r'\brefugiat', r'\bprotectie temporara', r'\bprotecție temporară',
+        # Російською (для Point.md, Newsmaker тощо)
+        r'\bукраин', r'\bзеленск', r'\bкиев', r'\bодесс', r'\bбеженц'
     ]
 
     backlog.sort(key=lambda x: x.get('timestamp', 0), reverse=True)
@@ -367,7 +370,8 @@ def process_backlog(stats=None):
     
     for item in ukraine_items:
         text_context = (item.get('title', '') + " " + item.get('description', '')).lower()
-        if any(kw in text_context for kw in ukraine_keywords):
+        # Нова перевірка з регулярними виразами:
+        if any(re.search(kw, text_context) for kw in ukraine_keywords):
             if item['url'] not in used_urls:
                 candidate_batch.append(item)
                 used_urls.add(item['url'])
@@ -405,6 +409,10 @@ def process_backlog(stats=None):
     2. АБСОЛЮТНИЙ ПРІОРИТЕТ (ПРАВА БІЖЕНЦІВ / ЗАКОНОДАВСТВО): Будь-які новини, що стосуються тимчасового захисту, статусу переміщених осіб, продовження терміну дії документів, соціальних прав або допомоги біженцам у Молдові, ОБОВ'ЯЗКОВО ЗАЛИШАТИ.
     3. ПРІОРИТЕТ "УКРАЇНА": Якщо в оригінальній новині згадується Україна, війна або біженці — постав емодзі 🇺🇦 на самий початок заголовка та винеси цю інформацію у перший абзац.
     4. ЧИСТОТА МОВИ: Використовуй ВИКЛЮЧНО стандартний український алфавіт.
+    5. ТОПОНІМИ ТА ІМЕНА: Усі молдавскі імена, прізвища, назви вулиць та міст (наприклад, Кишинів) обов'язково транслітеруй українською мовою. Не залишай латинські літери в тексті.
+    6. СТИЛЬ ТА СТРУКТУРА: Пиши у стилі сучасного новинного Telegram-каналу. Абзаци мають бути короткими (не більше 3-4 речень). Головну думку подавай у першому абзаці (принцип перевернутої піраміди).
+    7. НІЯКОГО ШІ-КОНТЕКСТУ: Видавай СУВОРО лише готовий текст новини. Жодних вступних фраз, привітань, коментарів чи висновків від себе. Зберігай абсолютну журналістську об'єктивність.
+    8. АКЦЕНТИ: Виділяй жирним шрифтом (в тегах <b>) ключові суми штрафів, дати, імена посадовців або назви законів, щоб текст було зручно читати.
     """
     
     for idx, item in enumerate(batch):
@@ -412,13 +420,20 @@ def process_backlog(stats=None):
         prompt += f"=== НОВИНА {idx+1} ===\nМає картинку: {has_image}\nЗаголовок: {item['title']}\nОпис: {item['description']}\n\n"
     
     prompt += f"""
-    Для кожної новини зроби:
-    1. Привабливий заголовок (в тегах <b>).
-    2. Об'єм тексту СУВОРО залежить від параметра "Має картинку":
-       - Якщо "Має картинку: Так" -> напиши детальний текст на 800–900 символів.
-       - Якщо "Має картинку: Ні" -> напиши великий лонгрід до 3000-3500 символів.
-    3. Тільки базові HTML-теги.
-    ВАЖЛИВО: Обов'язково розділяй відповіді для кожної новини строго рядком `|||`.
+    Для кожної новини виконай наступні вимоги:
+    
+    1. ЗАГОЛОВОК: Зроби привабливий, змістовний заголовок (обов'язково виділений тегами <b>).
+    
+    2. ОБ'ЄМ ТА КОНТЕКСТ:
+       - Якщо "Має картинку: Так" -> напиши лаконічний текст ДО 900 символів. Якщо суть події повністю розкрита за 500-600 символів — зупинись, не "лий воду" і не розтягуй штучно.
+       - Якщо "Має картинку: Ні" -> напиши розширений текст ДО 2500 символів. Якщо тема повністю вичерпана за 1500 символів — не додавай зайвого, головне — інформативність, а не обсяг.
+       УВАГА: Розширюй текст ВИКЛЮЧНО за рахунок пояснення контексту події та її значення. КАТЕГОРИЧНО ЗАБОРОНЕНО вигадувати неіснуючі імена, цитати, точні цифри чи дати, яких не було в оригіналі.
+       
+    3. СТРУКТУРА: Дроби текст на короткі абзаци (по 3-4 речення). Для розширених текстів використовуй марковані списки (з символом • або -), щоб інформацію було зручно читати.
+    
+    4. TELEGRAM HTML: Використовуй ТІЛЬКИ ці теги: <b>, <i>, <u>, <s>. Ніяких тегів <p>, <br>, <h1>, <li> і ніякої Markdown-розмітки (без зірочок ** чи решіток ##).
+    
+    5. ФОРМАТ ВИВОДУ: Розділяй готові тексти новин СУВОРО рядком `|||`. Не додавай жодних своїх коментарів на початку чи в кінці всієї відповіді.
     """
 
     generated_texts = []
@@ -459,9 +474,10 @@ def process_backlog(stats=None):
     for idx, item in enumerate(batch):
         if idx >= len(generated_texts): break 
         
-        final_text = generated_texts[idx] + generate_hashtags(item)
+        tags = generate_hashtags(item)
         
-        if send_to_telegram(final_text, item['url'], item.get('source', 'Джерело'), item['image_url']):
+        # Передаємо текст від ШІ та хештеги окремо
+        if send_to_telegram(generated_texts[idx], item['url'], item.get('source', 'Джерело'), item['image_url'], tags):
             history_urls = save_to_history(history_urls, item['url'], HISTORY_FILE)
             history_titles = save_to_history(history_titles, item['title'], TITLES_FILE)
             successful_urls.append(item['url'])
@@ -470,7 +486,8 @@ def process_backlog(stats=None):
                 stats["published"]["total"] += 1
                 
                 text_context = (item.get('title', '') + " " + item.get('description', '')).lower()
-                if any(kw in text_context for kw in ukraine_keywords):
+                # Нова перевірка з регулярними виразами:
+                if any(re.search(kw, text_context) for kw in ukraine_keywords):
                     stats["published"]["ukraine_priority"] += 1
                 
                 if item.get('image_url'): stats["published"]["with_images"] += 1
@@ -489,15 +506,20 @@ def process_backlog(stats=None):
     remaining_backlog.sort(key=lambda x: x.get('timestamp', 0), reverse=True)
     save_backlog(remaining_backlog[:50])
 
-def send_to_telegram(text, url, source_name, image_url=None):
+def send_to_telegram(text, url, source_name, image_url=None, tags=""):
     crop_msg = "...\n\n👉 <i>Повні деталі читайте за посиланням нижче</i> 👇"
     
-    if image_url and len(text) > 920: 
-        text = text[:920] + crop_msg
+    # Вираховуємо безпечний ліміт з урахуванням довжини хештегів
+    safe_caption_limit = 920 - len(tags)
+    
+    if image_url and len(text) > safe_caption_limit: 
+        text = text[:safe_caption_limit] + crop_msg
     elif not image_url and len(text) > 3900: 
         text = text[:3900] + crop_msg
     
-    full_message = f"{text}\n\n🔗 Джерело: <a href='{url}'>{source_name}</a>"
+    # Додаємо хештеги ВЖЕ ПІСЛЯ обрізки, перед посиланням на джерело
+    full_message = f"{text}{tags}\n\n🔗 Джерело: <a href='{url}'>{source_name}</a>"
+    
     payload = {'chat_id': TELEGRAM_CHANNEL_ID, 'parse_mode': 'HTML'}
     
     if image_url:
