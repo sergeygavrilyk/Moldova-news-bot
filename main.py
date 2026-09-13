@@ -311,14 +311,30 @@ def scrape_feeds(stats=None):
         
         try: 
             response = scraper.get(feed_url, timeout=15)
-            # ... решта перевірок ...
+            
+            if response.status_code not in [200, 301, 302]:
+                logging.error(f"❌ Помилка доступу до {feed_url}: HTTP статус {response.status_code}")
+                continue
+                
+            feed = feedparser.parse(response.text)
+            
+            if not feed.entries:
+                logging.warning(f"⚠️ Фід порожній (немає новин): {feed_url}")
+                continue
+                
+        except Exception as e: 
+            logging.error(f"❌ Збій парсингу {feed_url}: {e}")
+            continue
             
         for entry in feed.entries[:15]: 
             if stats is not None: stats["funnel"]["scraped_total"] += 1
             
             url = entry.link
             title = entry.title
-            if url in history_urls or title in history_titles or url in backlog_urls: continue
+            if url in history_urls or title in history_titles or url in backlog_urls: 
+                if stats is not None and "already_seen" in stats["funnel"]:
+                    stats["funnel"]["already_seen"] += 1
+                continue
             
             article_time = time.time()
             if hasattr(entry, 'published_parsed') and entry.published_parsed:
