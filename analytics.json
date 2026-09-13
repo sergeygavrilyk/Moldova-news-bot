@@ -622,5 +622,31 @@
         },
         "errors_count": 0,
         "gemini_retries": 2
+    },
+    {
+        "timestamp": "2026-09-13 12:01:18",
+        "execution_time": 59.9,
+        "funnel": {
+            "scraped_total": 35,
+            "rejected_by_keywords": 0,
+            "duplicates_removed_by_ai": 8
+        },
+        "backlog": {
+            "total_size": 11,
+            "sources": {
+                "Newsmaker": 3,
+                "IPN": 6,
+                "Point MD": 2
+            }
+        },
+        "published": {
+            "total": 0,
+            "ukraine_priority": 0,
+            "with_images": 0,
+            "text_only": 0,
+            "sources": {}
+        },
+        "errors_count": 3,
+        "gemini_retries": 0
     }
 ]
