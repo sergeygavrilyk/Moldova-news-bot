@@ -94,5 +94,13 @@
         "image_url": null,
         "source": "Newsmaker",
         "timestamp": 1789310362
+    },
+    {
+        "title": "В Италии гражданин Молдовы насмерть сбил велосипедистку и скрылся",
+        "description": "46-летняя жительница Италии погибла после того, как ее сбил фургон, когда она ехала на велосипеде недалеко от Виареджо.",
+        "url": "https://point.md/ru/novosti/proisshestviya/v-italii-grazhdanin-moldovy-nasmert-sbil-velosipedistku-i-skrylsia/",
+        "image_url": "https://i.simpalsmedia.com/point.md/news/600x315/04800a41df7d1d43a2d200f4c7d1c59a.jpg",
+        "source": "Point MD",
+        "timestamp": 1789315200
     }
 ]
