@@ -212,25 +212,28 @@ def deduplicate_news(client, articles, history_titles=None):
         
     logging.info("Аналіз на дублікати (включно з історією) через Gemini...")
     
-    recent_history = history_titles[-25:] if history_titles else []
+    # Збільшена глибина пам'яті (приблизно 2-3 дні публікацій)
+    recent_history = history_titles[-75:] if history_titles else []
     prompt_data = [{"id": i, "title": a["title"], "description": a.get("description", "")} for i, a in enumerate(articles)]
     
+    # Оптимізований промпт з чіткою XML-ізоляцією даних
     prompt = f"""
-    Ось список новин (ID, Заголовок), які претендують на публікацію:
+    Ти — суворий головний редактор. Твоє завдання — відфільтрувати список новин-кандидатів.
+
+    ПРАВИЛА ВІДБОРУ:
+    1. ТЕМАТИКА: Залишай лише важливі молдовські новини (суспільство, економіка, політика, надзвичайні ситуації).
+    2. ПРІОРИТЕТ 🇺🇦: Новини про тимчасовий захист, життя біженців, соціальні виплати чи закони Молдови щодо українців ОБОВ'ЯЗКОВО ЗАЛИШАТИ.
+    3. СТОП-ТЕМИ: БЕЗЖАЛЬНО ВІДХИЛЯЙ спорт, шоу-бізнес, розваги, гороскопи, рекламу та іноземні новини без прив'язки до Молдови чи України.
+    4. ВНУТРІШНІ ДУБЛІ: Якщо кілька новин-кандидатів описують одну подію, залиши лише ОДНУ — ту, що має найбільш інформативний опис.
+    5. ІСТОРІЯ: Якщо подія вже згадується у списку <HISTORY>, відхиляй нові статті про неї повністю.
+
+    <CANDIDATES>
     {json.dumps(prompt_data, ensure_ascii=False, indent=2)}
-    
-    Ось ІСТОРІЯ - список із {len(recent_history)} останніх опублікованих нами новин:
+    </CANDIDATES>
+
+    <HISTORY>
     {json.dumps(recent_history, ensure_ascii=False, indent=2)}
-    
-    Твоє завдання:
-    1. ЩО ЗАЛИШАТИ (ТЕМАТИКА): Ти ПОВИНЕН залишати новини, якщо це: 
-       - Важливі молдовські новини (місцеві події, суспільство, економіка, кримінал, надзвичайні ситуації).
-       - Життя українців та українців-біженців у Молдові.
-       - Молдовські новини про події в Україні.
-    2. ЩО ВІДХИЛЯТИ (СТОП-ТЕМИ): БЕЗЖАЛЬНО ВІДХИЛЯЙ світові новини (якщо немає прив'язки до Молдови/України), а також будь-який спорт, шоу-бізнес, розваги, гороскопи та рекламу.
-    3. АБСОЛЮТНИЙ ПРІОРИТЕТ (ПРАВА БІЖЕНЦІВ / ЗАКОНОДАВСТВО МОЛДОВИ): Новини про статус тимчасового захисту, документи, соціальні виплати чи допомогу біженцям ОБОВ'ЯЗКОВО ЗАЛИШАТИ.
-    4. ЗНАЙТИ ВНУТРІШНІ ДУБЛІКАТИ: Якщо кілька новин-претендентів описують одну подію, залиши серед них лише ОДНУ.
-    5. ПОРІВНЯТИ З ІСТОРІЄЮ: Якщо новина стосується події, про яку ми ВЖЕ писали в Історії, її треба ВІДХИЛИТИ повністю.
+    </HISTORY>
     
     Поверни результат СУВОРО як масив JSON з ID новин, які треба ЗАЛИШИТИ. Більше ніякого тексту.
     """
@@ -259,7 +262,7 @@ def deduplicate_news(client, articles, history_titles=None):
             
             removed_count = len(articles) - len(filtered_articles)
             if removed_count > 0:
-                logging.info(f"🗑️ [Gemini] Відсіяно як дублікати (або вже було): {removed_count}")
+                logging.info(f"🗑️ [Gemini] Відсіяно як дублікати/спам (або вже було): {removed_count}")
             return filtered_articles
             
         except Exception as e:
@@ -268,21 +271,26 @@ def deduplicate_news(client, articles, history_titles=None):
                 time.sleep(10)
             else:
                 send_alert_to_admin(f"Gemini API недоступний після {max_retries} спроб. Помилка: {e}")
-                return articles
+                # Повертаємо порожній список, щоб не публікувати спам у разі збою API
+                return []
 
 def prioritize_ukraine_news(backlog_items):
-    # Адаптовано ключі (румунська + українська + російська згадки)
-    keywords = [
-        'ucraina', 'ucrainean', 'ucraineana', 'kiev', 'zelenski', 'odessa', 
-        'refugiat', 'protectie temporara', 'ajutor umanitar', 'razboi', 'conflict', 
-        'agresiune', 'ukrajin', 'zelensk', 'kijev', 'pomoć', 'izbjeglic'
+    # Очищений Regex-список для Молдови (румунські + російські маркери)
+    ukraine_keywords = [
+        # Румунською
+        r'\bucrain', r'\bzelenski', r'\bkiev', r'\bkiiv', r'\bodesa', r'\bodessa',
+        r'\brefugiat', r'\bprotectie temporara', r'\bprotecție temporară',
+        # Російською (для Point.md, Newsmaker тощо)
+        r'\bукраин', r'\bзеленск', r'\bкиев', r'\bодесс', r'\bбеженц'
     ]
+    
     ukraine_news = []
     other_news = []
     
     for item in backlog_items:
         text_context = (item.get('title', '') + " " + item.get('description', '')).lower()
-        if any(kw in text_context for kw in keywords):
+        # Використовуємо re.search для точного пошуку коренів слів
+        if any(re.search(kw, text_context) for kw in ukraine_keywords):
             ukraine_news.append(item)
         else:
             other_news.append(item)
