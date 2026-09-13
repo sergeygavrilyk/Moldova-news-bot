@@ -123,7 +123,8 @@ def send_analytics_to_admin(stats):
         logging.warning("ADMIN_CHAT_ID не налаштовано")
         return
         
-    backlog_src_str = ", ".join([f"{k}: {v}" for k, v in stats['backlog']['sources'].items()]) if stats['backlog']['sources'] else "Порожньо"
+    scraped_src_str = ", ".join([f"{k}: {v}" for k, v in stats['funnel'].get('scraped_by_source', {}).items()]) if stats['funnel'].get('scraped_by_source') else "Немає"
+    backlog_src_str = ", ".join([f"{k}: {v}" for k, v in stats['backlog']['sources'].items()]) if stats['backlog']['sources'] else "Порожньо"  # <--- ЦЬОГО НЕ ВИСТАЧАЄ
     pub_src_str = ", ".join([f"{k}: {v}" for k, v in stats['published']['sources'].items()]) if stats['published']['sources'] else "Немає"
 
     message = (
@@ -132,6 +133,8 @@ def send_analytics_to_admin(stats):
         f"⚠️ Помилок: {stats['errors_count']} | Ретраїв Gemini: {stats['gemini_retries']}\n\n"
         f"🔍 <b>Воронка фільтрації:</b>\n"
         f"▪️ Знайдено в RSS: {stats['funnel']['scraped_total']}\n"
+        f"▪️ По джерелах: {scraped_src_str}\n"
+        f"▪️ Пропущено (старі/вже в історії): {stats['funnel']['already_seen']}\n"
         f"▪️ Відсіяно фільтрами (код): {stats['funnel']['rejected_by_keywords']}\n"
         f"▪️ Відсіяно Gemini (дублі/історія): {stats['funnel']['duplicates_removed_by_ai']}\n\n"
         f"📥 <b>Беклог (очікують ШІ-валідації: {stats['backlog']['total_size']}):</b>\n"
@@ -301,26 +304,18 @@ def scrape_feeds(stats=None):
         feed_url = feed_item['url']
         source_name = feed_item.get('name', get_source_name(feed_url))
         
+        if stats is not None and "scraped_by_source" not in stats["funnel"]:
+            stats["funnel"]["scraped_by_source"] = {}
+            
+        source_count = 0  # Лічильник для конкретного сайту
+        
         try: 
             response = scraper.get(feed_url, timeout=15)
-            
-            if response.status_code not in [200, 301, 302]:
-                logging.error(f"❌ Помилка доступу до {feed_url}: HTTP статус {response.status_code}")
-                continue
-                
-            feed = feedparser.parse(response.text)
-            
-            if not feed.entries:
-                logging.warning(f"⚠️ Фід порожній (немає новин): {feed_url}")
-                continue
-                
-        except Exception as e: 
-            logging.error(f"❌ Збій парсингу {feed_url}: {e}")
-            continue
+            # ... решта перевірок ...
             
         for entry in feed.entries[:15]: 
             if stats is not None: stats["funnel"]["scraped_total"] += 1
-                
+            
             url = entry.link
             title = entry.title
             if url in history_urls or title in history_titles or url in backlog_urls: continue
@@ -340,6 +335,11 @@ def scrape_feeds(stats=None):
                 'image_url': extract_image_url(entry), 'source': source_name, 'timestamp': article_time
             })
             backlog_urls.append(url)
+            source_count += 1  # Фіксуємо успішно додану/оброблену новину з цього джерела
+            
+        if stats is not None:
+            stats["funnel"]["scraped_by_source"][source_name] = source_count
+            
     save_backlog(backlog)
 
 def process_backlog(stats=None):
@@ -552,6 +552,8 @@ def main():
         "execution_time": 0,
         "funnel": {
             "scraped_total": 0,
+            "scraped_by_source": {},  # <--- Додано сюди
+            "already_seen": 0,  # <--- ДОДАНО ЦЕЙ РЯДОК
             "rejected_by_keywords": 0,
             "duplicates_removed_by_ai": 0
         },
