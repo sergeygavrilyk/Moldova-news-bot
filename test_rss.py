@@ -12,6 +12,11 @@ feeds = [
     "category": "Регіональні"
   },
 {
+    "name": "Moldovalive",
+    "url": "https://moldovalive.md/feed/",
+    "category": "Регіональні"
+  },
+{
     "name": "Point MD",
     "url": "https://point.md/ru/rss/novosti/",
     "category": "Регіональні"
