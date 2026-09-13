@@ -231,7 +231,7 @@ def deduplicate_news(client, articles, history_titles=None):
     for attempt in range(max_retries):
         try:
             response = client.models.generate_content(
-                model='gemini-3.6-flash', 
+                model='gemini-2.5-flash-lite', 
                 contents=prompt,
                 config={"response_mime_type": "application/json"}
             )
@@ -427,7 +427,7 @@ def process_backlog(stats=None):
 
     for attempt in range(3):
         try:
-            response = client.models.generate_content(model='gemini-3.6-flash', contents=prompt)
+            response = client.models.generate_content(model='gemini-2.5-flash-lite', contents=prompt)
             
             # ДОДАНО: Виводимо сиру відповідь ШІ в лог, щоб бачити проблему
             logging.info(f"Текст від Gemini:\n{response.text}") 
