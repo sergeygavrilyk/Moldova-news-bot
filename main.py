@@ -310,7 +310,11 @@ def scrape_feeds(stats=None):
         source_count = 0  # Лічильник для конкретного сайту
         
         try: 
-            response = scraper.get(feed_url, timeout=15)
+            # Додаємо заголовки, щоб сервер Moldovalive зрозумів, що ми RSS-читалка, а не браузер
+            headers = {
+                'Accept': 'application/rss+xml, application/xml, text/xml, */*'
+            }
+            response = scraper.get(feed_url, headers=headers, timeout=15)
             
             if response.status_code not in [200, 301, 302]:
                 logging.error(f"❌ Помилка доступу до {feed_url}: HTTP статус {response.status_code}")
@@ -328,6 +332,9 @@ def scrape_feeds(stats=None):
             
         for entry in feed.entries[:15]: 
             if stats is not None: stats["funnel"]["scraped_total"] += 1
+            source_count += 1  # <--- ПЕРЕНЕСЛИ СЮДИ: Рахуємо всі фактично знайдені статті
+            
+            url = entry.link
             
             url = entry.link
             title = entry.title
@@ -351,8 +358,7 @@ def scrape_feeds(stats=None):
                 'image_url': extract_image_url(entry), 'source': source_name, 'timestamp': article_time
             })
             backlog_urls.append(url)
-            source_count += 1  # Фіксуємо успішно додану/оброблену новину з цього джерела
-            
+                        
         if stats is not None:
             stats["funnel"]["scraped_by_source"][source_name] = source_count
             
