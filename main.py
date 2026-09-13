@@ -60,19 +60,19 @@ def trim_history(filename, max_lines=1000):
         logging.error(f"Помилка обрізки файлу {filename}: {e}")
 
 def generate_hashtags(item):
-    """Генерує хештеги на основі тексту новини (румунські + російські маркери)."""
+    """Генерує хештеги на основі тексту новини (адаптовано)."""
     tags = []
     text_context = (item.get('title', '') + " " + item.get('description', '') + " " + item.get('source', '')).lower()
     
-    # Додано кириличні маркери: кишинев, молдов, новост
-    if any(kw in text_context for kw in ['chisinau', 'chisinăului', 'moldova', 'moldovei', 'stiri', 'кишинев', 'молдов', 'новост']):
-        tags.append('#Молдова')
+    # Видалили загальний тег #Молдова.
+    # Замість нього можна тегувати конкретно столицю, якщо новина місцева (опціонально)
+    if any(kw in text_context for kw in ['chisinau', 'chisinăului', 'кишинев']):
+        tags.append('#Кишинів')
         
-    # Додано кириличні маркери: беженц, защит, убежищ
+    # Залишаємо справді важливі маркери для навігації діаспори
     if any(kw in text_context for kw in ['protectie', 'temporara', 'refugiati', 'azil', 'suport', 'беженц', 'защит', 'убежищ']):
         tags.append('#ТимчасовийЗахист')
         
-    # Додано кириличні маркери: украин, киев, зеленск, войн
     if any(kw in text_context for kw in ['ucraina', 'ukraine', 'kiev', 'zelenski', 'razboi', 'украин', 'киев', 'зеленск', 'войн']):
         tags.append('#Україна')
         
