@@ -1603,5 +1603,40 @@
         },
         "errors_count": 0,
         "gemini_retries": 0
+    },
+    {
+        "timestamp": "2026-09-15 15:01:22",
+        "execution_time": 228.2,
+        "funnel": {
+            "scraped_total": 35,
+            "scraped_by_source": {
+                "Newsmaker": 10,
+                "Moldovalive": 10,
+                "Point MD": 15
+            },
+            "already_seen": 12,
+            "rejected_by_keywords": 2,
+            "duplicates_removed_by_ai": 14
+        },
+        "backlog": {
+            "total_size": 33,
+            "sources": {
+                "Moldovalive": 5,
+                "IPN": 8,
+                "Newsmaker": 8,
+                "Point MD": 12
+            }
+        },
+        "published": {
+            "total": 3,
+            "ukraine_priority": 0,
+            "with_images": 3,
+            "text_only": 0,
+            "sources": {
+                "Point MD": 3
+            }
+        },
+        "errors_count": 0,
+        "gemini_retries": 0
     }
 ]
