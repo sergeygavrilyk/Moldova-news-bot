@@ -113,13 +113,32 @@ def load_analytics():
 def save_analytics(stats):
     history = load_analytics()
     history.append(stats)
+    # Збільшено до 1000, щоб зберігати історію за весь місяць
     with open(ANALYTICS_FILE, 'w', encoding='utf-8') as f:
-        json.dump(history[-100:], f, ensure_ascii=False, indent=4)
+        json.dump(history[-1000:], f, ensure_ascii=False, indent=4)
 
 def send_analytics_to_admin(stats):
     if not ADMIN_CHAT_ID: 
         logging.warning("ADMIN_CHAT_ID не налаштовано")
         return
+        
+    # --- НОВЕ: Розрахунок історії токенів ---
+    history = load_analytics()
+    now = datetime.datetime.now()
+    tokens_day = tokens_week = tokens_month = 0
+    
+    for run in history:
+        try:
+            run_date = datetime.datetime.strptime(run["timestamp"], '%Y-%m-%d %H:%M:%S')
+            delta = now - run_date
+            tokens = run.get("tokens_used", 0)
+            
+            if delta.days < 1: tokens_day += tokens
+            if delta.days < 7: tokens_week += tokens
+            if delta.days < 30: tokens_month += tokens
+        except Exception:
+            pass
+    # ----------------------------------------
         
     scraped_src_str = ", ".join([f"{k}: {v}" for k, v in stats['funnel'].get('scraped_by_source', {}).items()]) if stats['funnel'].get('scraped_by_source') else "Немає"
     backlog_src_str = ", ".join([f"{k}: {v}" for k, v in stats['backlog']['sources'].items()]) if stats['backlog']['sources'] else "Порожньо"
@@ -127,8 +146,9 @@ def send_analytics_to_admin(stats):
 
     message = (
         f"📊 <b>Розширений звіт бота (Молдова)</b>\n\n"
-        f"⏱ Час виконання: {stats['execution_time']} сек\n"
-        f"⚠️ Помилок: {stats['errors_count']} | Ретраїв Gemini: {stats['gemini_retries']}\n\n"
+        f"⏱ Час: {stats['execution_time']} сек | ⚠️ Помилок: {stats['errors_count']} | 🔄 Ретрай: {stats['gemini_retries']}\n"
+        f"🪙 <b>Токени (сьогодні/тиждень/місяць):</b>\n"
+        f"   {tokens_day:,} / {tokens_week:,} / {tokens_month:,}\n\n"
         f"🔍 <b>Воронка фільтрації:</b>\n"
         f"▪️ Знайдено в RSS: {stats['funnel']['scraped_total']}\n"
         f"▪️ По джерелах: {scraped_src_str}\n"
@@ -210,7 +230,7 @@ def is_quality_article(title, description, url):
     
     return True
 
-def deduplicate_news(client, articles, history_titles=None):
+def deduplicate_news(client, articles, history_titles=None, stats=None):
     if not articles: 
         return articles
         
@@ -260,7 +280,11 @@ def deduplicate_news(client, articles, history_titles=None):
                 contents=prompt,
                 config={"response_mime_type": "application/json"}
             )
-            
+            # --- НОВЕ: Записуємо витрачені токени ---
+            if stats is not None and getattr(response, 'usage_metadata', None):
+                stats["tokens_used"] += response.usage_metadata.total_token_count
+            # ----------------------------------------
+
             logging.info(f"Промпт до Gemini містив {len(articles)} новин.")
             logging.info(f"Відповідь Gemini: {response.text}")
             
@@ -480,7 +504,7 @@ def process_backlog(stats=None):
 
     history_titles = load_history(TITLES_FILE)
     len_before = len(candidate_batch)
-    candidate_batch = deduplicate_news(client, candidate_batch, history_titles)
+    candidate_batch = deduplicate_news(client, candidate_batch, history_titles, stats)
     
     if stats is not None:
         stats["funnel"]["duplicates_removed_by_ai"] += (len_before - len(candidate_batch))
@@ -526,6 +550,12 @@ def process_backlog(stats=None):
     for attempt in range(3):
         try:
             response = client.models.generate_content(model='gemini-3.5-flash-lite', contents=prompt)
+            
+            # --- НОВЕ: Записуємо витрачені токени ---
+            if stats is not None and getattr(response, 'usage_metadata', None):
+                stats["tokens_used"] += response.usage_metadata.total_token_count
+            # ----------------------------------------
+
             logging.info(f"Текст від Gemini:\n{response.text}") 
             
             # Жорстке видалення небажаних символів
@@ -640,6 +670,7 @@ def main():
     stats = {
         "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
         "execution_time": 0,
+        "tokens_used": 0,  # <-- ДОДАНО ПОЛЕ
         "funnel": {
             "scraped_total": 0,
             "scraped_by_source": {},  
