@@ -203,76 +203,77 @@ def scrape_feeds(stats):
     conn = get_db_connection()
     cursor = conn.cursor()
     scraper = cloudscraper.create_scraper(browser={'browser': 'chrome', 'platform': 'windows', 'mobile': False})
-    
+      
     active_sources = get_active_sources()
     if not active_sources:
         conn.close()
         return
-        
+          
     now = datetime.datetime.now()
     current_time = time.time()
 
-    # Отримуємо наявні URL та заголовки з бази для перевірки дублікатів
-    cursor.execute("SELECT url FROM articles")
+    # ОПТИМІЗАЦІЯ: кешуємо в пам'ять лише недавні URL та заголовки (за останні 3 дні), 
+    # щоб уникнути витоку пам'яті та сповільнення при зростанні бази.
+    cursor.execute("SELECT url FROM articles WHERE created_at >= NOW() - INTERVAL '3 days'")
     db_urls = {row[0] for row in cursor.fetchall()}
-    
-    cursor.execute("SELECT title FROM articles")
+      
+    cursor.execute("SELECT title FROM articles WHERE created_at >= NOW() - INTERVAL '3 days'")
     db_titles = {row[0] for row in cursor.fetchall()}
 
     for source_id, source_name, feed_url in active_sources:
         if "scraped_by_source" not in stats["funnel"]: stats["funnel"]["scraped_by_source"] = {}
-        source_count = 0  
-        try: 
+        source_count = 0    
+        try:   
             response = scraper.get(feed_url, headers={'Accept': 'application/rss+xml, application/xml, text/xml, */*'}, timeout=15)
             if response.status_code not in [200, 301, 302]: raise Exception(f"HTTP {response.status_code}")
             feed = feedparser.parse(response.text)
             if not feed.entries: continue
             cursor.execute("UPDATE sources SET status = 'ok', error_count = 0, last_error_log = NULL, last_checked = %s WHERE id = %s", (now, source_id))
-        except Exception as e: 
+        except Exception as e:   
             cursor.execute("UPDATE sources SET error_count = error_count + 1, last_error_log = %s, last_checked = %s WHERE id = %s", (str(e), now, source_id))
             cursor.execute("SELECT error_count FROM sources WHERE id = %s", (source_id,))
             if cursor.fetchone()[0] >= 3: cursor.execute("UPDATE sources SET status = 'error' WHERE id = %s", (source_id,))
             conn.commit()
-            continue 
-            
-        for entry in feed.entries[:15]: 
+            continue   
+              
+        for entry in feed.entries[:15]:   
             stats["funnel"]["scraped_total"] += 1
             source_count += 1
             url = entry.link
             title = entry.title
             guid = getattr(entry, 'id', url)
-            
+              
             if url in db_urls or title in db_titles:
                 stats["funnel"]["already_seen"] += 1
                 continue
-            
+              
             article_time = time.time()
             if hasattr(entry, 'published_parsed') and entry.published_parsed:
                 article_time = calendar.timegm(entry.published_parsed)
                 if current_time - article_time > MAX_AGE_SECONDS:
                     stats["funnel"]["already_seen"] += 1
                     continue
-                
+                  
             description = entry.get('summary', title)
             if not is_quality_article(title, description, url): 
                 stats["funnel"]["rejected_by_keywords"] += 1
                 continue
 
             images = extract_image_urls(entry)
-            
+              
             cursor.execute('''
                 INSERT INTO articles (guid, source_id, title, description, url, image_urls, status)
                 VALUES (%s, %s, %s, %s, %s, %s, 'pending')
                 ON CONFLICT (guid) DO NOTHING
             ''', (guid, source_id, title, description, url, json.dumps(images)))
-            
+              
             db_urls.add(url)
             db_titles.add(title)
-            
+              
         stats["funnel"]["scraped_by_source"][source_name] = source_count
-            
+              
     conn.commit()
-    cursor.close()        
+    cursor.close()          
     conn.close()
 
 def process_backlog(stats):
