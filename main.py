@@ -12,7 +12,8 @@ import random
 from urllib.parse import urlparse
 from dotenv import load_dotenv
 from google import genai
-import cloudscraper  
+import cloudscraper
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 # Додаємо маскування під звичайний браузер
 feedparser.USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
@@ -113,7 +114,6 @@ def load_analytics():
 def save_analytics(stats):
     history = load_analytics()
     history.append(stats)
-    # Збільшено до 1000, щоб зберігати історію за весь місяць
     with open(ANALYTICS_FILE, 'w', encoding='utf-8') as f:
         json.dump(history[-1000:], f, ensure_ascii=False, indent=4)
 
@@ -122,7 +122,6 @@ def send_analytics_to_admin(stats):
         logging.warning("ADMIN_CHAT_ID не налаштовано")
         return
         
-    # --- НОВЕ: Розрахунок історії токенів ---
     history = load_analytics()
     now = datetime.datetime.now()
     tokens_day = tokens_week = tokens_month = 0
@@ -138,7 +137,6 @@ def send_analytics_to_admin(stats):
             if delta.days < 30: tokens_month += tokens
         except Exception:
             pass
-    # ----------------------------------------
         
     scraped_src_str = ", ".join([f"{k}: {v}" for k, v in stats['funnel'].get('scraped_by_source', {}).items()]) if stats['funnel'].get('scraped_by_source') else "Немає"
     backlog_src_str = ", ".join([f"{k}: {v}" for k, v in stats['backlog']['sources'].items()]) if stats['backlog']['sources'] else "Порожньо"
@@ -185,13 +183,23 @@ def get_active_sources():
         logging.error(f"Помилка читання БД: {e}")
         return []
 
-def extract_image_url(entry):
-    if 'media_content' in entry and len(entry.media_content) > 0:
-        return entry.media_content[0].get('url')
-    if 'enclosures' in entry and len(entry.enclosures) > 0:
+def extract_image_urls(entry):
+    urls = []
+    
+    if 'media_content' in entry:
+        for media in entry.media_content:
+            url = media.get('url')
+            if url and url not in urls:
+                urls.append(url)
+                
+    if 'enclosures' in entry:
         for enc in entry.enclosures:
-            if enc.get('type', '').startswith('image/'): return enc.get('href')
-    return None
+            if enc.get('type', '').startswith('image/'):
+                url = enc.get('href')
+                if url and url not in urls:
+                    urls.append(url)
+                    
+    return urls[:10]
 
 def get_source_name(url):
     try:
@@ -230,6 +238,47 @@ def is_quality_article(title, description, url):
     
     return True
 
+# ================= TENACITY ОБГОРТКИ =================
+@retry(stop=stop_after_attempt(4), wait=wait_exponential(multiplier=2, min=5, max=60))
+def call_gemini_json(client, prompt):
+    return client.models.generate_content(
+        model='gemini-3.5-flash-lite', 
+        contents=prompt,
+        config={"response_mime_type": "application/json"}
+    )
+
+@retry(stop=stop_after_attempt(4), wait=wait_exponential(multiplier=2, min=15, max=60))
+def generate_news_texts(client, prompt, expected_count):
+    response = client.models.generate_content(model='gemini-3.5-flash-lite', contents=prompt)
+    clean_text = response.text.replace('ב', 'б').replace('є́', 'є').replace('і́', 'і')
+    texts = [t.strip() for t in clean_text.strip().split('|||') if t.strip()]
+    
+    if len(texts) != expected_count:
+        logging.warning(f"Gemini повернув {len(texts)} текстів замість {expected_count}. Повтор...")
+        raise ValueError("Невірна кількість згенерованих текстів")
+        
+    return response, texts
+
+@retry(stop=stop_after_attempt(4), wait=wait_exponential(multiplier=2, min=3, max=30))
+def execute_telegram_request(api_url, payload):
+    resp = requests.post(api_url, data=payload)
+    
+    if resp.status_code == 400 and "parse entities" in resp.text.lower():
+        logging.warning("⚠️ Помилка HTML-розмітки. Відправляємо без HTML...")
+        if 'media' in payload:
+            media_objs = json.loads(payload['media'])
+            if 'parse_mode' in media_objs[0]: del media_objs[0]['parse_mode']
+            payload['media'] = json.dumps(media_objs)
+        elif 'parse_mode' in payload:
+            del payload['parse_mode']
+        resp = requests.post(api_url, data=payload) 
+        
+    if resp.status_code != 200:
+        raise Exception(f"Telegram API Error {resp.status_code}: {resp.text}")
+        
+    return True
+# =====================================================
+
 def deduplicate_news(client, articles, history_titles=None, stats=None):
     if not articles: 
         return articles
@@ -243,23 +292,11 @@ def deduplicate_news(client, articles, history_titles=None, stats=None):
     Ти — суворий і безжальний головний редактор. Твоє завдання — відфільтрувати список новин-кандидатів.
 
     АЛГОРИТМ ВІДБОРУ (Оцінюй кожну новину суворо за цими кроками):
-
-    КРОК 1. ІДЕНТИФІКАЦІЯ "КОРЕНЕВОЇ ПОДІЇ" (ОСНОВА):
-    Читаючи кожну новину, визначай її "корінь" (головну фізичну подію: ХТО, ЩО і ДЕ). Реакції влади, нові деталі чи коментарі щодо однієї події — це не різні новини, це гілки одного кореня.
-
-    КРОК 2. КЛАСТЕРИЗАЦІЯ ДУБЛІВ (МІЖ ДЖЕРЕЛАМИ): 
-    Якщо кілька новин стосуються однієї кореневої події, збери їх у кластер і залишай ТІЛЬКИ ОДНУ найінформативнішу статтю. Решту відхиляй.
-
-    КРОК 3. ФІЛЬТР ІСТОРІЇ (АНТИ-СПАМ): 
-    Порівняй кандидатів зі списком <HISTORY>. Якщо коренева подія вже згадувалася в історії — безжально відхиляй (окрім кардинальної розв'язки).
-
-    КРОК 4. СТОП-ТЕМИ: 
-    Відхиляй спорт, шоу-бізнес, розваги, гороскопи, рекламу та іноземні новини без прив'язки до Молдови чи України.
-
-    КРОК 5. ТЕМАТИКА (ЩО ЗАЛИШИТИ): 
-    Тільки з тих новин, які успішно пройшли Кроки 1-4, залишай:
-    - Новини про українців та тимчасовий захист у Молдові (Абсолютний пріоритет).
-    - Важливі молдовські новини (суспільство, економіка, політика, надзвичайні ситуації).
+    КРОК 1. ІДЕНТИФІКАЦІЯ "КОРЕНЕВОЇ ПОДІЇ" (ОСНОВА): Читаючи кожну новину, визначай її "корінь" (головну фізичну подію: ХТО, ЩО і ДЕ).
+    КРОК 2. КЛАСТЕРИЗАЦІЯ ДУБЛІВ (МІЖ ДЖЕРЕЛАМИ): Якщо кілька новин стосуються однієї кореневої події, збери їх у кластер і залишай ТІЛЬКИ ОДНУ.
+    КРОК 3. ФІЛЬТР ІСТОРІЇ (АНТИ-СПАМ): Порівняй кандидатів зі списком <HISTORY>. Якщо було — відхиляй.
+    КРОК 4. СТОП-ТЕМИ: Відхиляй спорт, шоу-бізнес, розваги, гороскопи, рекламу.
+    КРОК 5. ТЕМАТИКА: Залишай новини про українців та тимчасовий захист у Молдові (Абсолютний пріоритет) та важливі молдовські новини.
 
     <CANDIDATES>
     {json.dumps(prompt_data, ensure_ascii=False, indent=2)}
@@ -272,44 +309,32 @@ def deduplicate_news(client, articles, history_titles=None, stats=None):
     Поверни результат СУВОРО як масив JSON з ID новин, які треба ЗАЛИШИТИ. Більше ніякого тексту.
     """
     
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            response = client.models.generate_content(
-                model='gemini-3.5-flash-lite', 
-                contents=prompt,
-                config={"response_mime_type": "application/json"}
-            )
-            # --- НОВЕ: Записуємо витрачені токени ---
-            if stats is not None and getattr(response, 'usage_metadata', None):
-                stats["tokens_used"] += response.usage_metadata.total_token_count
-            # ----------------------------------------
+    try:
+        response = call_gemini_json(client, prompt)
+        
+        if stats is not None and getattr(response, 'usage_metadata', None):
+            stats["tokens_used"] += response.usage_metadata.total_token_count
 
-            logging.info(f"Промпт до Gemini містив {len(articles)} новин.")
-            logging.info(f"Відповідь Gemini: {response.text}")
-            
-            raw_ids = json.loads(response.text)
-            keep_ids = []
-            
-            for item in raw_ids:
-                if isinstance(item, dict) and 'id' in item: keep_ids.append(int(item['id']))
-                elif isinstance(item, (int, str)) and str(item).isdigit(): keep_ids.append(int(item))
-                    
-            keep_ids = list(set(keep_ids))
-            filtered_articles = [articles[i] for i in keep_ids if i < len(articles)]
-            
-            removed_count = len(articles) - len(filtered_articles)
-            if removed_count > 0:
-                logging.info(f"🗑️ [Gemini] Відсіяно як дублікати/спам (або вже було): {removed_count}")
-            return filtered_articles
-            
-        except Exception as e:
-            logging.error(f"Помилка дедуплікації (спроба {attempt+1}/{max_retries}): {e}")
-            if attempt < max_retries - 1:
-                time.sleep(10)
-            else:
-                send_alert_to_admin(f"Gemini API недоступний після {max_retries} спроб. Помилка: {e}")
-                return []
+        logging.info(f"Промпт до Gemini містив {len(articles)} новин.")
+        logging.info(f"Відповідь Gemini: {response.text}")
+        
+        raw_ids = json.loads(response.text)
+        keep_ids = list(set([
+            int(item['id']) if isinstance(item, dict) and 'id' in item else int(item)
+            for item in raw_ids if str(item if not isinstance(item, dict) else item.get('id', '')).isdigit()
+        ]))
+                
+        filtered_articles = [articles[i] for i in keep_ids if i < len(articles)]
+        removed_count = len(articles) - len(filtered_articles)
+        
+        if removed_count > 0:
+            logging.info(f"🗑️ [Gemini] Відсіяно як дублікати/спам (або вже було): {removed_count}")
+        return filtered_articles
+        
+    except Exception as e:
+        logging.error(f"❌ Помилка дедуплікації після всіх спроб: {e}")
+        send_alert_to_admin(f"Gemini API недоступний: {e}")
+        return []
 
 def prioritize_ukraine_news(backlog_items):
     ukraine_keywords = [
@@ -369,7 +394,6 @@ def scrape_feeds(stats=None):
                 logging.warning(f"⚠️ Фід порожній (немає новин): {feed_url}")
                 continue
             
-            # 🟢 УСПІХ - оновлюємо Health Check у базі
             cursor.execute("""
                 UPDATE sources 
                 SET status = 'ok', error_count = 0, last_error_log = NULL, last_checked = ?
@@ -381,45 +405,35 @@ def scrape_feeds(stats=None):
             error_text = str(e)
             logging.error(f"❌ Збій парсингу {feed_url}: {error_text}")
             
-            # 🔴 ПОМИЛКА - записуємо в Health Check
             cursor.execute("""
                 UPDATE sources 
                 SET error_count = error_count + 1, last_error_log = ?, last_checked = ?
                 WHERE id = ?
             """, (error_text, now, source_id))
             
-            # Перевірка на відключення джерела
             cursor.execute("SELECT error_count FROM sources WHERE id = ?", (source_id,))
             if cursor.fetchone()[0] >= MAX_ERRORS_ALLOWED:
                 logging.error(f"🚨 Джерело {source_name} ВІДКЛЮЧЕНО ({MAX_ERRORS_ALLOWED} помилок поспіль)")
                 cursor.execute("UPDATE sources SET status = 'error' WHERE id = ?", (source_id,))
             
             conn.commit()
-            continue # Пропускаємо це джерело і йдемо до наступного
+            continue 
             
-        # Запис успішних новин у беклог
         for entry in feed.entries[:15]: 
             if stats is not None: stats["funnel"]["scraped_total"] += 1
             source_count += 1
             
             url = entry.link
             title = entry.title
-            
-            # --- НОВЕ: Отримання GUID ---
-            # Бібліотека feedparser зазвичай зберігає guid у полі 'id'. 
-            # Якщо з якоїсь причини його немає (поганий RSS), беремо url як запасний варіант.
             guid = getattr(entry, 'id', url)
             
-            # Спроба додати в БД. Якщо такий guid вже є, база відхилить запис (rowcount буде 0)
             cursor.execute('''
                 INSERT OR IGNORE INTO articles (guid, source_id, title, status)
                 VALUES (?, ?, ?, 'pending')
             ''', (guid, source_id, title))
             
             is_duplicate_guid = (cursor.rowcount == 0)
-            # ------------------------------
             
-            # Тепер ми відсікаємо дублікати і за старим текстовим кешем (для зворотної сумісності), і за новим GUID
             if is_duplicate_guid or url in history_urls or title in history_titles or url in backlog_urls: 
                 if stats is not None and "already_seen" in stats["funnel"]:
                     stats["funnel"]["already_seen"] += 1
@@ -436,9 +450,9 @@ def scrape_feeds(stats=None):
                 continue
 
             backlog.append({
-                'guid': guid,  # Зберігаємо guid у словник беклогу, щоб потім відмітити як відправлене
+                'guid': guid, 
                 'title': title, 'description': description, 'url': url,
-                'image_url': extract_image_url(entry), 'source': source_name, 'timestamp': article_time
+                'image_urls': extract_image_urls(entry), 'source': source_name, 'timestamp': article_time
             })
             backlog_urls.append(url)
             
@@ -465,7 +479,6 @@ def process_backlog(stats=None):
     all_sources.sort()
     if not all_sources: return
     
-    # Повна рандомізація джерел
     ordered_sources = all_sources.copy()
     random.shuffle(ordered_sources) 
     target_source = ordered_sources[0]
@@ -484,7 +497,6 @@ def process_backlog(stats=None):
                 candidate_batch.append(item)
                 used_urls.add(item['url'])
                 
-    # Рівномірний розподіл черги
     while len(candidate_batch) < 25:
         added_this_round = False
         for src in ordered_sources:
@@ -501,7 +513,6 @@ def process_backlog(stats=None):
     if not candidate_batch: return
 
     evaluated_urls = {item['url'] for item in candidate_batch}
-
     history_titles = load_history(TITLES_FILE)
     len_before = len(candidate_batch)
     candidate_batch = deduplicate_news(client, candidate_batch, history_titles, stats)
@@ -528,7 +539,8 @@ def process_backlog(stats=None):
     """
     
     for idx, item in enumerate(batch):
-        has_image = "Так" if item.get('image_url') else "Ні"
+        images = item.get('image_urls') or ([item['image_url']] if item.get('image_url') else [])
+        has_image = "Так" if images else "Ні"
         prompt += f"=== НОВИНА {idx+1} ===\nМає картинку: {has_image}\nЗаголовок: {item['title']}\nОпис: {item['description']}\n\n"
     
     prompt += f"""
@@ -543,39 +555,15 @@ def process_backlog(stats=None):
     5. ФОРМАТ ВИВОДУ: Розділяй готові тексти новин СУВОРО рядком `|||`.
     """
 
-    generated_texts = []
-    logging.info("Очікування перед викликом Gemini API...")
+    logging.info("Очікування 15с перед викликом Gemini API для дотримання RPM...")
     time.sleep(15)
-
-    for attempt in range(3):
-        try:
-            response = client.models.generate_content(model='gemini-3.5-flash-lite', contents=prompt)
-            
-            # --- НОВЕ: Записуємо витрачені токени ---
-            if stats is not None and getattr(response, 'usage_metadata', None):
-                stats["tokens_used"] += response.usage_metadata.total_token_count
-            # ----------------------------------------
-
-            logging.info(f"Текст від Gemini:\n{response.text}") 
-            
-            # Жорстке видалення небажаних символів
-            clean_text = response.text.replace('ב', 'б').replace('є́', 'є').replace('і́', 'і')
-            generated_texts = [t.strip() for t in clean_text.strip().split('|||') if t.strip()]
-            
-            if len(generated_texts) == len(batch):
-                break
-            else:
-                logging.warning(f"Gemini повернув {len(generated_texts)} текстів, а треба {len(batch)}. Повторна спроба...")
-                if stats is not None: stats["gemini_retries"] += 1
-                time.sleep(15)
-                
-        except Exception as e:
-            logging.warning(f"Помилка Gemini API: {e}. Очікування 60с (Спроба {attempt+1}/3)")
-            if stats is not None: stats["gemini_retries"] += 1
-            time.sleep(60)
-            
-    if not generated_texts: 
-        logging.error("❌ Не вдалося згенерувати тексти після 3 спроб. Скасування публікації.")
+    
+    try:
+        response, generated_texts = generate_news_texts(client, prompt, len(batch))
+        if stats is not None and getattr(response, 'usage_metadata', None):
+            stats["tokens_used"] += response.usage_metadata.total_token_count
+    except Exception as e:
+        logging.error(f"❌ Не вдалося згенерувати тексти після всіх спроб: {e}")
         if stats is not None: stats["errors_count"] += 1  
         return
 
@@ -587,13 +575,13 @@ def process_backlog(stats=None):
         if idx >= len(generated_texts): break 
         
         tags = generate_hashtags(item)
+        images = item.get('image_urls') or ([item['image_url']] if item.get('image_url') else [])
         
-        if send_to_telegram(generated_texts[idx], item['url'], item.get('source', 'Джерело'), item['image_url'], tags):
+        if send_to_telegram(generated_texts[idx], item['url'], item.get('source', 'Джерело'), images, tags):
             history_urls = save_to_history(history_urls, item['url'], HISTORY_FILE)
             history_titles = save_to_history(history_titles, item['title'], TITLES_FILE)
             successful_urls.append(item['url'])
             
-            # --- НОВЕ: Відмічаємо новину як опубліковану в базі даних ---
             try:
                 db_conn = sqlite3.connect(DB_FILE)
                 db_conn.execute("UPDATE articles SET status = 'sent' WHERE guid = ?", (item.get('guid', item['url']),))
@@ -601,16 +589,14 @@ def process_backlog(stats=None):
                 db_conn.close()
             except Exception as db_err:
                 logging.error(f"Помилка оновлення статусу статті в БД: {db_err}")
-            # --------------------------------------------------------------
             
             if stats is not None:
                 stats["published"]["total"] += 1
-                
                 text_context = (item.get('title', '') + " " + item.get('description', '')).lower()
                 if any(re.search(kw, text_context) for kw in ukraine_keywords):
                     stats["published"]["ukraine_priority"] += 1
                 
-                if item.get('image_url'): stats["published"]["with_images"] += 1
+                if images: stats["published"]["with_images"] += 1
                 else: stats["published"]["text_only"] += 1
                 
                 src = item.get('source', 'Джерело')
@@ -624,45 +610,69 @@ def process_backlog(stats=None):
     remaining_backlog.sort(key=lambda x: x.get('timestamp', 0), reverse=True)
     save_backlog(remaining_backlog[:30])
 
-def send_to_telegram(text, url, source_name, image_url=None, tags=""):
-    # Фінальний захист від галюцинацій у тексті
+def send_to_telegram(text, url, source_name, image_urls=None, tags=""):
     text = text.replace('ב', 'б').replace('є́', 'є').replace('і́', 'і')
+    
+    if not image_urls: image_urls = []
+    elif isinstance(image_urls, str): image_urls = [image_urls]
     
     crop_msg = "...\n\n👉 <i>Повні деталі читайте за посиланням нижче</i> 👇"
     safe_caption_limit = 920 - len(tags)
     
-    if image_url and len(text) > safe_caption_limit: 
+    if image_urls and len(text) > safe_caption_limit: 
         text = text[:safe_caption_limit] + crop_msg
-    elif not image_url and len(text) > 3900: 
+    elif not image_urls and len(text) > 3900: 
         text = text[:3900] + crop_msg
     
     full_message = f"{text}{tags}\n\n🔗 Джерело: <a href='{url}'>{source_name}</a>"
-    payload = {'chat_id': TELEGRAM_CHANNEL_ID, 'parse_mode': 'HTML'}
+    payload = {'chat_id': TELEGRAM_CHANNEL_ID}
     
-    if image_url:
-        payload['photo'] = image_url
-        payload['caption'] = full_message
-        api_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
-    else:
+    if len(image_urls) == 0:
+        payload['parse_mode'] = 'HTML'
         payload['text'] = full_message
         api_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    
-    try:
-        resp = requests.post(api_url, data=payload)
         
-        # ЗАХИСТ ВІД ЗЛАМАНИХ ТЕГІВ У TELEGRAM
-        if resp.status_code == 400 and "parse entities" in resp.text.lower():
-            logging.warning("⚠️ Помилка HTML-розмітки. Відправляємо без HTML...")
-            del payload['parse_mode'] 
-            resp = requests.post(api_url, data=payload) 
+    elif len(image_urls) == 1:
+        payload['parse_mode'] = 'HTML'
+        payload['caption'] = full_message
+        payload['photo'] = image_urls[0]
+        api_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+        
+    else:
+        media = []
+        for idx, img_url in enumerate(image_urls):
+            media_item = {'type': 'photo', 'media': img_url}
+            if idx == 0:
+                media_item['caption'] = full_message
+                media_item['parse_mode'] = 'HTML'
+            media.append(media_item)
             
-        if resp.status_code != 200:
-            logging.error(f"❌ Telegram відхилив повідомлення: {resp.text}")
-            
-        return resp.status_code == 200
+        payload['media'] = json.dumps(media)
+        api_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMediaGroup"
+
+    try:
+        return execute_telegram_request(api_url, payload)
     except Exception as e: 
-        logging.error(f"❌ Критична помилка відправки в Telegram: {e}")
+        logging.error(f"❌ Критична помилка відправки в Telegram після всіх спроб: {e}")
         return False
+
+def cleanup_old_data(db_path, days_to_keep=30):
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute(f"DELETE FROM articles WHERE created_at <= datetime('now', '-{days_to_keep} days')")
+        deleted_count = cursor.rowcount
+        
+        cursor.execute("VACUUM")
+        conn.commit()
+        conn.close()
+        
+        if deleted_count > 0:
+            logging.info(f"🧹 Автоочищення: видалено {deleted_count} старих статей. Базу стиснуто.")
+            
+    except Exception as e:
+        logging.error(f"Помилка при очищенні бази даних: {e}")
 
 def main():
     start_time = time.time()
@@ -670,7 +680,7 @@ def main():
     stats = {
         "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
         "execution_time": 0,
-        "tokens_used": 0,  # <-- ДОДАНО ПОЛЕ
+        "tokens_used": 0,
         "funnel": {
             "scraped_total": 0,
             "scraped_by_source": {},  
@@ -706,6 +716,7 @@ def main():
         stats["backlog"]["sources"] = source_counts
         
         process_backlog(stats)
+        cleanup_old_data(DB_FILE, days_to_keep=30)
         
     except Exception as e:
         stats["errors_count"] += 1
