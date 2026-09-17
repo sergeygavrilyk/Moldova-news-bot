@@ -35,7 +35,9 @@ jobs:
         TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
         GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         ADMIN_CHAT_ID: ${{ secrets.ADMIN_CHAT_ID }}
-      run: python main.py
+      run: |
+        python setup_db.py
+        python main.py
 
     - name: Commit and push history and backlog state
       run: |
