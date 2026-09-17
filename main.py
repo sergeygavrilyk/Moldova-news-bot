@@ -659,13 +659,13 @@ def send_to_telegram(text, url, source_name, image_urls=None, tags=""):
 def cleanup_old_data(db_path, days_to_keep=30):
     try:
         conn = sqlite3.connect(db_path)
+        conn.isolation_level = None  # Вмикаємо режим автокоміту для VACUUM
         cursor = conn.cursor()
         
         cursor.execute(f"DELETE FROM articles WHERE created_at <= datetime('now', '-{days_to_keep} days')")
         deleted_count = cursor.rowcount
         
         cursor.execute("VACUUM")
-        conn.commit()
         conn.close()
         
         if deleted_count > 0:
