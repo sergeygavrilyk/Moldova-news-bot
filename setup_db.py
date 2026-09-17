@@ -4,19 +4,17 @@ import psycopg2
 from dotenv import load_dotenv
 
 load_dotenv()
-
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 def setup_database():
     if not DATABASE_URL:
-        print("❌ Помилка: DATABASE_URL не знайдено у файлі .env")
+        print("❌ DATABASE_URL не знайдено.")
         return
 
     try:
         conn = psycopg2.connect(DATABASE_URL)
         cursor = conn.cursor()
 
-        # Створення таблиці sources
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS sources (
             id SERIAL PRIMARY KEY,
@@ -29,36 +27,64 @@ def setup_database():
         )
         """)
 
-        # Створення таблиці articles
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS articles (
             guid TEXT PRIMARY KEY,
             source_id INTEGER REFERENCES sources(id),
             title TEXT,
+            description TEXT,
+            url TEXT,
+            image_urls JSONB,
             status VARCHAR(50) DEFAULT 'pending',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         """)
 
-        # Базові джерела (якщо у вас є файл feeds.json)
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS run_analytics (
+            id SERIAL PRIMARY KEY,
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            execution_time REAL,
+            tokens_used INTEGER,
+            scraped_total INTEGER,
+            duplicates_removed INTEGER,
+            published_total INTEGER,
+            errors_count INTEGER
+        )
+        """)
+
+        # Розумне завантаження джерел
         if os.path.exists('feeds.json'):
             with open('feeds.json', 'r', encoding='utf-8') as f:
                 feeds = json.load(f)
+            
+            # Якщо це словник {"Назва": "URL"}
+            if isinstance(feeds, dict):
+                items = feeds.items()
+            # Якщо це список
+            elif isinstance(feeds, list):
+                items = []
+                for item in feeds:
+                    if isinstance(item, str): 
+                        items.append(("Джерело", item))
+                    elif isinstance(item, dict):
+                        items.append((item.get("name", "Джерело"), item.get("url", "")))
+            else:
+                items = []
 
-            for source_name, feed_url in feeds.items():
+            for source_name, feed_url in items:
+                if not feed_url: continue
                 cursor.execute("""
-                    INSERT INTO sources (name, url)
-                    VALUES (%s, %s)
+                    INSERT INTO sources (name, url) VALUES (%s, %s)
                     ON CONFLICT (url) DO NOTHING
                 """, (source_name, feed_url))
 
         conn.commit()
         cursor.close()
         conn.close()
-        print("✅ База даних PostgreSQL успішно налаштована на Supabase!")
-        
+        print("✅ Хмарна БД PostgreSQL повністю налаштована!")
     except Exception as e:
-        print(f"❌ Помилка налаштування БД: {e}")
+        print(f"❌ Помилка БД: {e}")
 
 if __name__ == "__main__":
     setup_database()
