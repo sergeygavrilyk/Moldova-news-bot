@@ -157,24 +157,38 @@ def execute_telegram_request(api_url, payload):
 def deduplicate_news(client, articles, recent_history=None, stats=None):
     if not articles: return articles
     logging.info("Аналіз на дублікати через Gemini...")
+    
     history = recent_history[-75:] if recent_history else []
     prompt_data = [{"id": i, "title": a["title"], "description": a.get("description", "")} for i, a in enumerate(articles)]
-    prompt = f"""Ти головний редактор. Відфільтруй дублікати.
-    <CANDIDATES>{json.dumps(prompt_data, ensure_ascii=False, indent=2)}</CANDIDATES>
-    <HISTORY>{json.dumps(history, ensure_ascii=False, indent=2)}</HISTORY>
-    Поверни результат СУВОРО як масив JSON з ID новин, які треба ЗАЛИШИТИ. Більше ніякого тексту.
-    """
-    try:
-        response = call_gemini_json(client, prompt)
-        if stats is not None and getattr(response, 'usage_metadata', None): stats["tokens_used"] += response.usage_metadata.total_token_count
-        raw_ids = json.loads(response.text)
-        keep_ids = list(set([int(item['id']) if isinstance(item, dict) and 'id' in item else int(item) for item in raw_ids if str(item if not isinstance(item, dict) else item.get('id', '')).isdigit()]))
-        filtered_articles = [articles[i] for i in keep_ids if i < len(articles)]
-        if len(articles) - len(filtered_articles) > 0: logging.info(f"🗑️ Відсіяно ШІ: {len(articles) - len(filtered_articles)}")
-        return filtered_articles
-    except Exception as e:
-        logging.error(f"❌ Помилка Gemini API: {e}")
-        return []
+    
+    prompt = f"""Ти головний редактор. Відфільтруй дублікати.  
+    <CANDIDATES>{json.dumps(prompt_data, ensure_ascii=False, indent=2)}</CANDIDATES>  
+    <HISTORY>{json.dumps(history, ensure_ascii=False, indent=2)}</HISTORY>  
+    Поверни результат СУВОРО як масив JSON з ID новин, які треба ЗАЛИШИТИ. Більше ніякого тексту.  
+    """  
+    try:  
+        response = call_gemini_json(client, prompt)  
+        if stats is not None and getattr(response, 'usage_metadata', None): 
+            stats["tokens_used"] += response.usage_metadata.total_token_count
+            
+        text_response = response.text.strip()
+        if "```json" in text_response:
+            text_response = text_response.split("```json")[1].split("```")[0].strip()
+        elif "```" in text_response:
+            text_response = text_response.split("```")[1].split("```")[0].strip()
+
+        raw_ids = json.loads(text_response)  
+        keep_ids = list(set([int(item['id']) if isinstance(item, dict) and 'id' in item else int(item) for item in raw_ids if str(item if not isinstance(item, dict) else item.get('id', '')).isdigit()]))  
+        
+        filtered_articles = [articles[i] for i in keep_ids if i < len(articles)]  
+        if len(articles) - len(filtered_articles) > 0: 
+            logging.info(f"🗑️ Відсіяно ШІ: {len(articles) - len(filtered_articles)}")  
+        return filtered_articles  
+        
+    except Exception as e:  
+        logging.error(f"❌ Помилка Gemini API у deduplicate_news: {e}. Пропускаємо фільтрацію без втрати новин.")  
+        # ЗАХИСТ: У разі збою парсингу повертаємо весь пакет, а не порожній список []
+        return articles
 
 def prioritize_ukraine_news(backlog_items):
     ukraine_keywords = [r'\bucrain', r'\bzelenski', r'\bkiev', r'\bkiiv', r'\bodesa', r'\bodessa', r'\brefugiat', r'\bprotectie temporara', r'\bprotecție temporară', r'\bprivremen\w*\s+protectie', r'\bукраин', r'\bзеленск', r'\bкиев', r'\bодесс', r'\bбеженц']
@@ -264,7 +278,7 @@ def scrape_feeds(stats):
 def process_backlog(stats):
     conn = get_db_connection()
     cursor = conn.cursor()
-    
+      
     cursor.execute("""
         SELECT a.guid, a.title, a.description, a.url, a.image_urls, s.name, EXTRACT(EPOCH FROM a.created_at) as timestamp
         FROM articles a JOIN sources s ON a.source_id = s.id 
@@ -277,36 +291,46 @@ def process_backlog(stats):
             'guid': r[0], 'title': r[1], 'description': r[2], 'url': r[3], 
             'image_urls': r[4] if r[4] else [], 'source': r[5], 'timestamp': r[6] or time.time()
         })
-        
+          
     stats["backlog"]["total_size"] = len(backlog)
     source_counts = {}
     for item in backlog: source_counts[item.get('source', 'Невідомо')] = source_counts.get(item.get('source', 'Невідомо'), 0) + 1
     stats["backlog"]["sources"] = source_counts
 
     if not backlog:
+        cursor.close()
         conn.close()
         return
 
     ukraine_keywords = [r'\bucrain', r'\bzelenski', r'\bkiev', r'\bkiiv', r'\bodesa', r'\bodessa', r'\brefugiat', r'\bprotectie temporara', r'\bprotecție temporară', r'\bprivremen\w*\s+protectie', r'\bукраин', r'\bзеленск', r'\bкиев', r'\bодесс', r'\bбеженц']
     backlog.sort(key=lambda x: x.get('timestamp', 0), reverse=True)
-    
+      
     all_sources = list(dict.fromkeys(item['source'] for item in backlog))
     all_sources.sort()
     if not all_sources:
+        cursor.close()
         conn.close()
         return
-        
+          
     ordered_sources = all_sources.copy()
     random.shuffle(ordered_sources) 
-    
+      
     candidate_batch = []
     used_urls = set()
-    for item in prioritize_ukraine_news(backlog):
-        if any(re.search(kw, (item.get('title', '') + " " + item.get('description', '')).lower()) for kw in ukraine_keywords):
+    
+    # ОПТИМІЗАЦІЯ: оскільки prioritize_ukraine_news виносить українські новини на початок,
+    # перевіряємо їх і робимо ранній вихід (break), коли вони закінчуються.
+    sorted_backlog = prioritize_ukraine_news(backlog)
+    for item in sorted_backlog:
+        text_context = (item.get('title', '') + " " + item.get('description', '')).lower()
+        if any(re.search(kw, text_context) for kw in ukraine_keywords):
             if item['url'] not in used_urls:
                 candidate_batch.append(item)
                 used_urls.add(item['url'])
-                
+        else:
+            # Зустріли першу не-українську новину — далі йдуть інші, виходимо з циклу пріоритету
+            break
+                  
     while len(candidate_batch) < 25:
         added_this_round = False
         for src in ordered_sources:
@@ -318,9 +342,10 @@ def process_backlog(stats):
                     break 
             if len(candidate_batch) >= 25: break
         if not added_this_round: break 
-            
+              
     candidate_batch = candidate_batch[:25]
     if not candidate_batch:
+        cursor.close()
         conn.close()
         return
 
@@ -334,14 +359,15 @@ def process_backlog(stats):
 
     batch = candidate_batch[:BATCH_SIZE]
     if not batch:
+        cursor.close()
         conn.close()
         return
-        
+          
     prompt = f"Переклади {len(batch)} новин українською. ПРАВИЛА: 1. Всі події в Молдові/світі. 2. Якщо про біженців - детально. 3. Пріоритет Україна - емодзі 🇺🇦. 4. ТІЛЬКИ українська. 5. HTML теги <b>, <i>, <u>, <s>. Розділяй `|||`.\n\n"
     for idx, item in enumerate(batch):
         has_image = "Так" if item.get('image_urls') else "Ні"
         prompt += f"=== НОВИНА {idx+1} ===\nКартинка: {has_image}\nЗаголовок: {item['title']}\nОпис: {item['description']}\n\n"
-    
+      
     time.sleep(15)
     try:
         response, generated_texts = generate_news_texts(client, prompt, len(batch))
@@ -349,6 +375,7 @@ def process_backlog(stats):
     except Exception as e:
         logging.error(f"❌ Помилка Gemini: {e}")
         stats["errors_count"] += 1 
+        cursor.close()
         conn.close()
         return
 
@@ -356,7 +383,7 @@ def process_backlog(stats):
         if idx >= len(generated_texts): break 
         tags = generate_hashtags(item)
         images = item.get('image_urls', [])
-        
+          
         if send_to_telegram(generated_texts[idx], item['url'], item.get('source', 'Джерело'), images, tags):
             try:
                 cursor.execute("UPDATE articles SET status = 'sent' WHERE guid = %s", (item['guid'],))
@@ -367,13 +394,19 @@ def process_backlog(stats):
                 if images: stats["published"]["with_images"] += 1
                 else: stats["published"]["text_only"] += 1
                 stats["published"]["sources"][item.get('source', 'Джерело')] = stats["published"]["sources"].get(item.get('source', 'Джерело'), 0) + 1
-                
+                  
                 time.sleep(45)
             except Exception as db_err: 
                 logging.error(f"Помилка БД: {db_err}")
         else:
             stats["errors_count"] += 1
+            try:
+                cursor.execute("UPDATE articles SET status = 'failed' WHERE guid = %s", (item['guid'],))
+                conn.commit()
+            except Exception as db_err:
+                logging.error(f"Помилка оновлення статусу failed в БД: {db_err}")
 
+    cursor.close()
     conn.close()
 
 def send_to_telegram(text, url, source_name, image_urls=None, tags=""):
