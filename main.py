@@ -68,17 +68,23 @@ def send_analytics_to_admin(stats):
         cursor.close()
         conn.close()
         
+        scraped_src_str = ", ".join([f"{k}: {v}" for k, v in stats['funnel'].get('scraped_by_source', {}).items()]) if stats['funnel'].get('scraped_by_source') else "Немає"
+        backlog_src_str = ", ".join([f"{k}: {v}" for k, v in stats['backlog']['sources'].items()]) if stats['backlog']['sources'] else "Порожньо"
+        pub_src_str = ", ".join([f"{k}: {v}" for k, v in stats['published']['sources'].items()]) if stats['published']['sources'] else "Немає"
+
         message = (
-            f"📊 <b>Звіт бота (Supabase)</b>\n\n"
-            f"✅ Опубліковано: {stats.get('published_total', 0)}\n"
-            f"🔍 Знайдено в RSS: {stats.get('scraped_total', 0)}\n"
-            f"🗑 Відсіяно ШІ (дублі): {stats.get('duplicates_removed', 0)}\n"
-            f"⚠️ Помилок: {stats.get('errors_count', 0)}\n\n"
-            f"🪙 <b>Токени:</b>\n"
-            f"▪️ Сьогодні: {tokens_day:,}\n"
-            f"▪️ Тиждень: {tokens_week:,}\n"
-            f"▪️ Місяць: {tokens_month:,}"
+            f"📊 <b>Розширений звіт бота (Молдова)</b>\n\n"
+            f"⏱ Час: {stats['execution_time']} сек | ⚠️ Помилок: {stats['errors_count']} | 🔄 Ретрай: {stats['gemini_retries']}\n"
+            f"🪙 <b>Токени (сьогодні/тиждень/місяць):</b>\n   {tokens_day:,} / {tokens_week:,} / {tokens_month:,}\n\n"
+            f"🔍 <b>Воронка фільтрації:</b>\n▪️ Знайдено в RSS: {stats['funnel']['scraped_total']}\n▪️ По джерелах: {scraped_src_str}\n"
+            f"▪️ Пропущено (старі/вже в історії): {stats['funnel']['already_seen']}\n▪️ Відсіяно фільтрами: {stats['funnel']['rejected_by_keywords']}\n"
+            f"▪️ Відсіяно Gemini (дублі/історія): {stats['funnel']['duplicates_removed_by_ai']}\n\n"
+            f"📥 <b>Беклог (очікують ШІ-валідації: {stats['backlog']['total_size']}):</b>\n▪️ {backlog_src_str}\n\n"
+            f"✅ <b>Опубліковано: {stats['published']['total']}</b>\n"
+            f"▪️ Формат: З фото ({stats['published']['with_images']}) | Текст ({stats['published']['text_only']})\n"
+            f"▪️ Пріоритет 🇺🇦: {stats['published']['ukraine_priority']}\n▪️ Джерела: {pub_src_str}"
         )
+        
         requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", 
                       data={'chat_id': ADMIN_CHAT_ID, 'text': message, 'parse_mode': 'HTML'})
     except Exception as e:
@@ -192,7 +198,15 @@ def scrape_feeds(stats):
     now = datetime.datetime.now()
     current_time = time.time()
 
+    # Отримуємо наявні URL та заголовки з бази для перевірки дублікатів
+    cursor.execute("SELECT url FROM articles")
+    db_urls = {row[0] for row in cursor.fetchall()}
+    
+    cursor.execute("SELECT title FROM articles")
+    db_titles = {row[0] for row in cursor.fetchall()}
+
     for source_id, source_name, feed_url in active_sources:
+        if "scraped_by_source" not in stats["funnel"]: stats["funnel"]["scraped_by_source"] = {}
         source_count = 0  
         try: 
             response = scraper.get(feed_url, headers={'Accept': 'application/rss+xml, application/xml, text/xml, */*'}, timeout=15)
@@ -208,20 +222,28 @@ def scrape_feeds(stats):
             continue 
             
         for entry in feed.entries[:15]: 
-            stats["scraped_total"] += 1
+            stats["funnel"]["scraped_total"] += 1
             source_count += 1
             url = entry.link
             title = entry.title
             guid = getattr(entry, 'id', url)
-            description = entry.get('summary', title)
             
-            if not is_quality_article(title, description, url): continue
+            if url in db_urls or title in db_titles:
+                stats["funnel"]["already_seen"] += 1
+                continue
             
             article_time = time.time()
             if hasattr(entry, 'published_parsed') and entry.published_parsed:
                 article_time = calendar.timegm(entry.published_parsed)
-                if current_time - article_time > MAX_AGE_SECONDS: continue
+                if current_time - article_time > MAX_AGE_SECONDS:
+                    stats["funnel"]["already_seen"] += 1
+                    continue
                 
+            description = entry.get('summary', title)
+            if not is_quality_article(title, description, url): 
+                stats["funnel"]["rejected_by_keywords"] += 1
+                continue
+
             images = extract_image_urls(entry)
             
             cursor.execute('''
@@ -229,6 +251,11 @@ def scrape_feeds(stats):
                 VALUES (%s, %s, %s, %s, %s, %s, 'pending')
                 ON CONFLICT (guid) DO NOTHING
             ''', (guid, source_id, title, description, url, json.dumps(images)))
+            
+            db_urls.add(url)
+            db_titles.add(title)
+            
+        stats["funnel"]["scraped_by_source"][source_name] = source_count
             
     conn.commit()
     cursor.close()        
@@ -238,7 +265,6 @@ def process_backlog(stats):
     conn = get_db_connection()
     cursor = conn.cursor()
     
-    # Завантажуємо беклог (pending новини) з бази
     cursor.execute("""
         SELECT a.guid, a.title, a.description, a.url, a.image_urls, s.name, EXTRACT(EPOCH FROM a.created_at) as timestamp
         FROM articles a JOIN sources s ON a.source_id = s.id 
@@ -252,6 +278,11 @@ def process_backlog(stats):
             'image_urls': r[4] if r[4] else [], 'source': r[5], 'timestamp': r[6] or time.time()
         })
         
+    stats["backlog"]["total_size"] = len(backlog)
+    source_counts = {}
+    for item in backlog: source_counts[item.get('source', 'Невідомо')] = source_counts.get(item.get('source', 'Невідомо'), 0) + 1
+    stats["backlog"]["sources"] = source_counts
+
     if not backlog:
         conn.close()
         return
@@ -293,21 +324,19 @@ def process_backlog(stats):
         conn.close()
         return
 
-    # Отримуємо історію останніх відправлених заголовків з бази для перевірки дублікатів
     cursor.execute("SELECT title FROM articles WHERE status = 'sent' ORDER BY created_at DESC LIMIT 75")
     recent_history_titles = [row[0] for row in cursor.fetchall()]
 
     evaluated_urls = {item['url'] for item in candidate_batch}
     len_before = len(candidate_batch)
     candidate_batch = deduplicate_news(client, candidate_batch, recent_history_titles, stats)
-    stats["duplicates_removed"] += (len_before - len(candidate_batch))
+    stats["funnel"]["duplicates_removed_by_ai"] += (len_before - len(candidate_batch))
 
     batch = candidate_batch[:BATCH_SIZE]
     if not batch:
         conn.close()
         return
         
-    # ВЕРНУТО ВАШ ОРИГІНАЛЬНИЙ ПРОМПТ ПЕРЕКЛАДУ
     prompt = f"Переклади {len(batch)} новин українською. ПРАВИЛА: 1. Всі події в Молдові/світі. 2. Якщо про біженців - детально. 3. Пріоритет Україна - емодзі 🇺🇦. 4. ТІЛЬКИ українська. 5. HTML теги <b>, <i>, <u>, <s>. Розділяй `|||`.\n\n"
     for idx, item in enumerate(batch):
         has_image = "Так" if item.get('image_urls') else "Ні"
@@ -332,7 +361,13 @@ def process_backlog(stats):
             try:
                 cursor.execute("UPDATE articles SET status = 'sent' WHERE guid = %s", (item['guid'],))
                 conn.commit()
-                stats["published_total"] += 1
+                stats["published"]["total"] += 1
+                if any(re.search(kw, (item.get('title', '') + " " + item.get('description', '')).lower()) for kw in ukraine_keywords): 
+                    stats["published"]["ukraine_priority"] += 1
+                if images: stats["published"]["with_images"] += 1
+                else: stats["published"]["text_only"] += 1
+                stats["published"]["sources"][item.get('source', 'Джерело')] = stats["published"]["sources"].get(item.get('source', 'Джерело'), 0) + 1
+                
                 time.sleep(45)
             except Exception as db_err: 
                 logging.error(f"Помилка БД: {db_err}")
@@ -376,11 +411,13 @@ def send_to_telegram(text, url, source_name, image_urls=None, tags=""):
 def main():
     start_time = time.time()
     stats = {
-        "scraped_total": 0, 
-        "duplicates_removed": 0, 
-        "published_total": 0, 
-        "errors_count": 0, 
-        "tokens_used": 0
+        "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'), 
+        "execution_time": 0, 
+        "tokens_used": 0,
+        "funnel": {"scraped_total": 0, "scraped_by_source": {}, "already_seen": 0, "rejected_by_keywords": 0, "duplicates_removed_by_ai": 0},
+        "backlog": {"total_size": 0, "sources": {}}, 
+        "published": {"total": 0, "ukraine_priority": 0, "with_images": 0, "text_only": 0, "sources": {}},
+        "errors_count": 0, "gemini_retries": 0
     }
     
     try:
@@ -393,7 +430,7 @@ def main():
             requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", 
                           data={'chat_id': ADMIN_CHAT_ID, 'text': f"⚠️ ALARM: Скрипт впав з помилкою: {e}"})
     finally:
-        exec_time = round(time.time() - start_time, 1)
+        stats["execution_time"] = round(time.time() - start_time, 1)
         
         try:
             conn = get_db_connection()
@@ -401,7 +438,7 @@ def main():
             cursor.execute("""
                 INSERT INTO run_analytics (execution_time, tokens_used, scraped_total, duplicates_removed, published_total, errors_count)
                 VALUES (%s, %s, %s, %s, %s, %s)
-            """, (exec_time, stats["tokens_used"], stats["scraped_total"], stats["duplicates_removed"], stats["published_total"], stats["errors_count"]))
+            """, (stats["execution_time"], stats["tokens_used"], stats["funnel"]["scraped_total"], stats["funnel"]["duplicates_removed_by_ai"], stats["published"]["total"], stats["errors_count"]))
             
             cursor.execute("DELETE FROM articles WHERE created_at <= NOW() - INTERVAL '30 days'")
             
@@ -411,8 +448,7 @@ def main():
         except Exception as e:
             logging.error(f"Помилка збереження аналітики в БД: {e}")
             
-        if stats["published_total"] > 0 or stats["errors_count"] > 0:
-            send_analytics_to_admin(stats)
+        send_analytics_to_admin(stats)
 
 if __name__ == "__main__":
     main()
