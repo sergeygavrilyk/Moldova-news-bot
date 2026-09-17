@@ -381,7 +381,22 @@ def scrape_feeds(stats=None):
             url = entry.link
             title = entry.title
             
-            if url in history_urls or title in history_titles or url in backlog_urls: 
+            # --- НОВЕ: Отримання GUID ---
+            # Бібліотека feedparser зазвичай зберігає guid у полі 'id'. 
+            # Якщо з якоїсь причини його немає (поганий RSS), беремо url як запасний варіант.
+            guid = getattr(entry, 'id', url)
+            
+            # Спроба додати в БД. Якщо такий guid вже є, база відхилить запис (rowcount буде 0)
+            cursor.execute('''
+                INSERT OR IGNORE INTO articles (guid, source_id, title, status)
+                VALUES (?, ?, ?, 'pending')
+            ''', (guid, source_id, title))
+            
+            is_duplicate_guid = (cursor.rowcount == 0)
+            # ------------------------------
+            
+            # Тепер ми відсікаємо дублікати і за старим текстовим кешем (для зворотної сумісності), і за новим GUID
+            if is_duplicate_guid or url in history_urls or title in history_titles or url in backlog_urls: 
                 if stats is not None and "already_seen" in stats["funnel"]:
                     stats["funnel"]["already_seen"] += 1
                 continue
@@ -397,6 +412,7 @@ def scrape_feeds(stats=None):
                 continue
 
             backlog.append({
+                'guid': guid,  # Зберігаємо guid у словник беклогу, щоб потім відмітити як відправлене
                 'title': title, 'description': description, 'url': url,
                 'image_url': extract_image_url(entry), 'source': source_name, 'timestamp': article_time
             })
@@ -546,6 +562,16 @@ def process_backlog(stats=None):
             history_urls = save_to_history(history_urls, item['url'], HISTORY_FILE)
             history_titles = save_to_history(history_titles, item['title'], TITLES_FILE)
             successful_urls.append(item['url'])
+            
+            # --- НОВЕ: Відмічаємо новину як опубліковану в базі даних ---
+            try:
+                db_conn = sqlite3.connect(DB_FILE)
+                db_conn.execute("UPDATE articles SET status = 'sent' WHERE guid = ?", (item.get('guid', item['url']),))
+                db_conn.commit()
+                db_conn.close()
+            except Exception as db_err:
+                logging.error(f"Помилка оновлення статусу статті в БД: {db_err}")
+            # --------------------------------------------------------------
             
             if stats is not None:
                 stats["published"]["total"] += 1
