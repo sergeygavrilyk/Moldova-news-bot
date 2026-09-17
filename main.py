@@ -363,6 +363,14 @@ def process_backlog(stats):
         cursor.close()
         conn.close()
         return
+      
+    # ЗАХИСТ ВІД ДУБЛЮВАННЯ: одразу переводимо обрану партію в статус 'processing'
+    batch_guids = [item['guid'] for item in batch]
+    try:
+        cursor.execute("UPDATE articles SET status = 'processing' WHERE guid = ANY(%s)", (batch_guids,))
+        conn.commit()
+    except Exception as db_err:
+        logging.error(f"Помилка встановлення статусу processing: {db_err}")
           
     prompt = f"Переклади {len(batch)} новин українською. ПРАВИЛА: 1. Всі події в Молдові/світі. 2. Якщо про біженців - детально. 3. Пріоритет Україна - емодзі 🇺🇦. 4. ТІЛЬКИ українська. 5. HTML теги <b>, <i>, <u>, <s>. Розділяй `|||`.\n\n"
     for idx, item in enumerate(batch):
