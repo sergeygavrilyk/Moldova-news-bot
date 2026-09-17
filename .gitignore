@@ -1,1 +1,8 @@
-﻿.env
+﻿__pycache__/
+bot_database.db
+bot_database.db-journal
+analytics.json
+news_backlog.json
+posted_news.txt
+posted_titles.txt
+.env
