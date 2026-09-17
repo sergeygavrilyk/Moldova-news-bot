@@ -1,9 +1,11 @@
+import sqlite3
+import datetime
 import feedparser
+import logging
 import requests
 import os
 import time
 import calendar
-import logging
 import json
 import re
 import random
@@ -33,10 +35,11 @@ if not all([TELEGRAM_BOT_TOKEN, TELEGRAM_CHANNEL_ID, GEMINI_API_KEY]):
     logging.error("Критична помилка: не знайдено базові токени у файлі .env!")
     exit(1)
 
+DB_FILE = 'bot_database.db'
+MAX_ERRORS_ALLOWED = 3
 HISTORY_FILE = 'posted_news.txt'
 TITLES_FILE = 'posted_titles.txt'
 BACKLOG_FILE = 'news_backlog.json'
-FEEDS_FILE = 'feeds.json'
 ANALYTICS_FILE = 'analytics.json'
 
 MAX_HISTORY_SIZE = 1000 
@@ -147,12 +150,19 @@ def send_analytics_to_admin(stats):
     except Exception as e: 
         logging.error(f"Збій з'єднання з Telegram API: {e}")
 
-def get_rss_feeds():
-    if not os.path.exists(FEEDS_FILE): return []
+def get_active_sources():
+    if not os.path.exists(DB_FILE): 
+        logging.error(f"БД {DB_FILE} не знайдена! Запустіть setup_db.py")
+        return []
     try:
-        with open(FEEDS_FILE, 'r', encoding='utf-8') as f: return json.load(f)
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, name, url FROM sources WHERE status = 'ok'")
+        sources = cursor.fetchall()
+        conn.close()
+        return sources
     except Exception as e:
-        logging.error(f"Помилка читання feeds.json: {e}")
+        logging.error(f"Помилка читання БД: {e}")
         return []
 
 def extract_image_url(entry):
@@ -307,11 +317,13 @@ def scrape_feeds(stats=None):
     backlog_urls = [item['url'] for item in backlog]
 
     scraper = cloudscraper.create_scraper(browser={'browser': 'chrome', 'platform': 'windows', 'mobile': False})
+    
+    active_sources = get_active_sources()
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    now = datetime.datetime.now().isoformat()
 
-    for feed_item in get_rss_feeds():
-        feed_url = feed_item['url']
-        source_name = feed_item.get('name', get_source_name(feed_url))
-        
+    for source_id, source_name, feed_url in active_sources:
         if stats is not None and "scraped_by_source" not in stats["funnel"]:
             stats["funnel"]["scraped_by_source"] = {}
             
@@ -322,19 +334,46 @@ def scrape_feeds(stats=None):
             response = scraper.get(feed_url, headers=headers, timeout=15)
             
             if response.status_code not in [200, 301, 302]:
-                logging.error(f"❌ Помилка доступу до {feed_url}: HTTP статус {response.status_code}")
-                continue
+                raise Exception(f"HTTP статус {response.status_code}")
                 
             feed = feedparser.parse(response.text)
+            
+            if getattr(feed, 'bozo', False) and not feed.entries:
+                raise Exception(f"Помилка структури RSS: {getattr(feed, 'bozo_exception', 'Unknown')}")
             
             if not feed.entries:
                 logging.warning(f"⚠️ Фід порожній (немає новин): {feed_url}")
                 continue
-                
-        except Exception as e: 
-            logging.error(f"❌ Збій парсингу {feed_url}: {e}")
-            continue
             
+            # 🟢 УСПІХ - оновлюємо Health Check у базі
+            cursor.execute("""
+                UPDATE sources 
+                SET status = 'ok', error_count = 0, last_error_log = NULL, last_checked = ?
+                WHERE id = ?
+            """, (now, source_id))
+            conn.commit()
+            
+        except Exception as e: 
+            error_text = str(e)
+            logging.error(f"❌ Збій парсингу {feed_url}: {error_text}")
+            
+            # 🔴 ПОМИЛКА - записуємо в Health Check
+            cursor.execute("""
+                UPDATE sources 
+                SET error_count = error_count + 1, last_error_log = ?, last_checked = ?
+                WHERE id = ?
+            """, (error_text, now, source_id))
+            
+            # Перевірка на відключення джерела
+            cursor.execute("SELECT error_count FROM sources WHERE id = ?", (source_id,))
+            if cursor.fetchone()[0] >= MAX_ERRORS_ALLOWED:
+                logging.error(f"🚨 Джерело {source_name} ВІДКЛЮЧЕНО ({MAX_ERRORS_ALLOWED} помилок поспіль)")
+                cursor.execute("UPDATE sources SET status = 'error' WHERE id = ?", (source_id,))
+            
+            conn.commit()
+            continue # Пропускаємо це джерело і йдемо до наступного
+            
+        # Запис успішних новин у беклог
         for entry in feed.entries[:15]: 
             if stats is not None: stats["funnel"]["scraped_total"] += 1
             source_count += 1
@@ -366,6 +405,7 @@ def scrape_feeds(stats=None):
         if stats is not None:
             stats["funnel"]["scraped_by_source"][source_name] = source_count
             
+    conn.close()
     save_backlog(backlog)
 
 def process_backlog(stats=None):
@@ -380,8 +420,8 @@ def process_backlog(stats=None):
     ]
 
     backlog.sort(key=lambda x: x.get('timestamp', 0), reverse=True)
-    all_feeds = get_rss_feeds()
-    all_sources = list(dict.fromkeys(f.get('name', get_source_name(f['url'])) for f in all_feeds))
+    all_feeds = get_active_sources()
+    all_sources = list(dict.fromkeys(name for _, name, _ in all_feeds))
     all_sources.sort()
     if not all_sources: return
     
