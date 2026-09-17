@@ -1,19 +1,12 @@
 name: Run Moldova News Bot
 
 on:
+  schedule:
   workflow_dispatch:
-  repository_dispatch:
-    types: [run-bot]
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
-    
-    environment: ${{ github.ref == 'refs/heads/main' && 'production' || 'staging' }}
-    
-    permissions:
-      contents: write 
-
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
@@ -39,20 +32,3 @@ jobs:
       run: |
         python setup_db.py
         python main.py
-
-    - name: Commit and push history and backlog state
-      run: |
-        git config --global user.name "github-actions[bot]"
-        git config --global user.email "github-actions[bot]@users.noreply.github.com"
-        
-        touch posted_news.txt posted_titles.txt news_backlog.json analytics.json
-        
-        git add posted_news.txt posted_titles.txt news_backlog.json analytics.json
-        
-        if ! git diff --staged --quiet; then
-          git commit -m "Update news history and backlog state [skip ci]"
-          git pull --rebase origin ${GITHUB_REF_NAME}
-          git push
-        else
-          echo "No changes in backlog or history to commit."
-        fi
