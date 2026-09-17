@@ -1,7 +1,6 @@
 name: Run Moldova News Bot
 
 on:
-  schedule:
   workflow_dispatch:
 
 jobs:
