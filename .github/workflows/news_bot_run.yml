@@ -2,7 +2,6 @@ name: Run Moldova News Bot
 
 on:
   workflow_dispatch:
-  repository_dispatch:
 
 jobs:
   run-bot:
