@@ -12,6 +12,7 @@ import psycopg2
 from urllib.parse import urlparse
 from dotenv import load_dotenv
 from google import genai
+from google.genai import types  # ДОДАНО ДЛЯ SAFETY SETTINGS
 import cloudscraper
 from tenacity import retry, stop_after_attempt, wait_exponential
 
@@ -131,14 +132,51 @@ def is_quality_article(title, description, url):
 
 @retry(stop=stop_after_attempt(4), wait=wait_exponential(multiplier=2, min=5, max=60))
 def call_gemini_json(client, prompt):
-    return client.models.generate_content(model='gemini-3.5-flash-lite', contents=prompt, config={"response_mime_type": "application/json"})
+    # Додано температуру 0.0 та відключення фільтрів безпеки
+    response = client.models.generate_content(
+        model='gemini-3.5-flash-lite', 
+        contents=prompt, 
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json",
+            temperature=0.0,
+            safety_settings=[
+                types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
+                types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
+                types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
+                types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE"),
+            ]
+        )
+    )
+    
+    # ЗАХИСТ: Якщо Gemini повернув порожнечу замість JSON, викликаємо помилку для ретраю
+    if not response or not getattr(response, 'text', None):
+        raise ValueError("Gemini повернув порожню відповідь (None) для JSON. Спрацьовує ретрай.")
+        
+    return response
 
 @retry(stop=stop_after_attempt(4), wait=wait_exponential(multiplier=2, min=15, max=60))
 def generate_news_texts(client, prompt, expected_count):
-    response = client.models.generate_content(model='gemini-3.5-flash-lite', contents=prompt)
+    # Додано відключення фільтрів безпеки для текстів
+    response = client.models.generate_content(
+        model='gemini-3.5-flash-lite', 
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            safety_settings=[
+                types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
+                types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
+                types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
+                types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE"),
+            ]
+        )
+    )
+    
+    # ЗАХИСТ ВІД ПОРОЖНЬОЇ ВІДПОВІДІ (Safety Filters / Збій API)
+    if not response or not getattr(response, 'text', None):
+        raise ValueError("Gemini повернув порожню відповідь (None). Спрацьовує ретрай.")
+        
     clean_text = response.text.replace('ב', 'б').replace('є́', 'є').replace('і́', 'і')
     texts = [t.strip() for t in clean_text.strip().split('|||') if t.strip()]
-    if len(texts) != expected_count: raise ValueError("Невірна кількість згенерованих текстів")
+    if len(texts) != expected_count: raise ValueError(f"Невірна кількість згенерованих текстів: очікували {expected_count}, отримали {len(texts)}")
     return response, texts
 
 @retry(stop=stop_after_attempt(4), wait=wait_exponential(multiplier=2, min=3, max=30))
@@ -165,6 +203,9 @@ def deduplicate_news(client, articles, recent_history=None, stats=None):
     
     history = recent_history[-75:] if recent_history else []
     prompt_data = [{"id": i, "title": a["title"], "description": a.get("description", "")} for i, a in enumerate(articles)]
+# ДОДАНО ЛОГУВАННЯ ЗАГОЛОВКІВ ("Прожектор")
+    titles_log = "\n".join([f"[{i}] {a['title']}" for i, a in enumerate(articles)])
+    logging.info(f"📋 Кандидати на фільтрацію (Молдова):\n{titles_log}")
     
     prompt = f"""Ти — суворий і безжальний головний редактор. Твоє завдання — відфільтрувати список новин-кандидатів.
 
