@@ -164,6 +164,9 @@ def generate_news_texts(client, prompt, expected_count):
     if not response or not getattr(response, 'text', None):
         raise ValueError("Gemini повернув порожню відповідь (None). Спрацьовує ретрай.")
         
+    # ДОДАЙТЕ ЦЕЙ РЯДОК:
+    logging.info(f"Текст від Gemini:\n{response.text}")
+        
     clean_text = response.text.replace('ב', 'б').replace('є́', 'є').replace('і́', 'і')
     texts = [t.strip() for t in clean_text.strip().split('|||') if t.strip()]
     if len(texts) != expected_count: raise ValueError(f"Невірна кількість згенерованих текстів: очікували {expected_count}, отримали {len(texts)}")
@@ -240,6 +243,10 @@ def deduplicate_news(client, articles, recent_history=None, stats=None):
             stats["tokens_used"] += response.usage_metadata.total_token_count
             
         text_response = response.text.strip()
+        
+        # ДОДАЙТЕ ЦЕЙ РЯДОК:
+        logging.info(f"Відповідь Gemini (фільтрація): {text_response}")
+        
         if "```json" in text_response:
             text_response = text_response.split("```json")[1].split("```")[0].strip()
         elif "```" in text_response:
@@ -430,6 +437,10 @@ def process_backlog(stats):
         cursor.close()
         conn.close()
         return
+      
+    # ДОДАЙТЕ ЦІ ДВА РЯДКИ:
+    used_sources_log = list(dict.fromkeys(item.get('source') for item in batch))
+    logging.info(f"🔄 Обрано {len(batch)} новин. Фактичні джерела: {', '.join(used_sources_log)}")
       
     # ЗАХИСТ ВІД ДУБЛЮВАННЯ: одразу переводимо обрану партію в статус 'processing'
     batch_guids = [item['guid'] for item in batch]
