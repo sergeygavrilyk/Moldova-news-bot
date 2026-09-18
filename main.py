@@ -33,9 +33,6 @@ GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 ADMIN_CHAT_ID = os.getenv('ADMIN_CHAT_ID') 
 DATABASE_URL = os.getenv('DATABASE_URL')
 
-if not all([TELEGRAM_BOT_TOKEN, TELEGRAM_CHANNEL_ID, GEMINI_API_KEY, DATABASE_URL]):
-    logging.error("Критична помилка: не знайдено базові токени або DATABASE_URL у файлі .env!")
-    exit(1)
 
 MAX_AGE_SECONDS = 43200 # 12 годин
 BATCH_SIZE = 3
@@ -153,6 +150,7 @@ def generate_news_texts(client, prompt, expected_count):
         model='gemini-3.5-flash-lite', 
         contents=prompt,
         config=types.GenerateContentConfig(
+            temperature=0.0, # <--- ДОДАЄМО ЦЕ ДЛЯ ЗНИЖЕННЯ ГАЛЮЦИНАЦІЙ
             safety_settings=[
                 types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
                 types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
@@ -550,7 +548,13 @@ def send_to_telegram(text, url, source_name, image_urls=None, tags=""):
         return False
 
 def main():
+    # Перевіряємо токени тут, коли скрипт безпосередньо запускається
+    if not all([TELEGRAM_BOT_TOKEN, TELEGRAM_CHANNEL_ID, GEMINI_API_KEY, DATABASE_URL]):
+        logging.error("Критична помилка: не знайдено базові токени або DATABASE_URL у файлі .env!")
+        exit(1)
+        
     start_time = time.time()
+    # ... далі йде словник stats ...
     stats = {
         "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'), 
         "execution_time": 0, 
