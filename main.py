@@ -45,14 +45,6 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
 
-def generate_hashtags(item):
-    tags = []
-    text_context = (item.get('title', '') + " " + item.get('description', '') + " " + item.get('source', '')).lower()
-    if any(kw in text_context for kw in ['chisinau', 'chisinăului', 'кишинев']): tags.append('#Кишинів')
-    if any(kw in text_context for kw in ['protectie', 'temporara', 'refugiati', 'azil', 'suport', 'беженц', 'защит', 'убежищ']): tags.append('#ТимчасовийЗахист')
-    if any(kw in text_context for kw in ['ucraina', 'ukraine', 'kiev', 'zelenski', 'razboi', 'украин', 'киев', 'зеленск', 'войн']): tags.append('#Україна')
-    return "\n\n" + " ".join(tags) if tags else ""
-
 def send_analytics_to_admin(stats):
     if not ADMIN_CHAT_ID: return
     try:
@@ -457,6 +449,7 @@ def process_backlog(stats):
     6. СТИЛЬ ТА СТРУКТУРА: Пиши у стилі сучасного новинного Telegram-каналу. Абзаци мають бути короткими (не більше 3-4 речень). Головну думку подавай у першому абзаці (принцип перевернутої піраміди).
     7. НІЯКОГО ШІ-КОНТЕКСТУ: Видавай СУВОРО лише готовий текст новини. Жодних вступних фраз, привітань, коментарів чи висновків від себе. Зберігай абсолютну журналістську об'єктивність.
     8. АКЦЕНТИ: Виділяй жирним шрифтом (в тегах <b>) ключові суми штрафів, дати, імена посадовців або назви законів.
+    9. ХЕШТЕГИ: В самому кінці тексту обов'язково додай 2-3 хештеги з нового рядка. Перший хештег — це місто або регіон події оригінальною латиницею (наприклад, #Chisinau, #Balti, #Tiraspol, #Orhei). Якщо точне місто невідоме — пиши #Moldova. Другі хештеги — тематичні (наприклад, #Україна, #ТимчасовийЗахист, #Кримінал, #ДТП, #Суспільство).
     """
     
     for idx, item in enumerate(batch):
@@ -493,10 +486,11 @@ def process_backlog(stats):
 
     for idx, item in enumerate(batch):
         if idx >= len(generated_texts): break 
-        tags = generate_hashtags(item)
+        
+        # Видалили виклик функції, передаємо порожні tags
         images = item.get('image_urls', [])
           
-        if send_to_telegram(generated_texts[idx], item['url'], item.get('source', 'Джерело'), images, tags):
+        if send_to_telegram(generated_texts[idx], item['url'], item.get('source', 'Джерело'), images, tags=""):
             try:
                 cursor.execute("UPDATE articles SET status = 'sent' WHERE guid = %s", (item['guid'],))
                 conn.commit()
