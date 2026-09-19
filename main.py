@@ -503,8 +503,18 @@ def process_backlog(stats):
         response, generated_texts = generate_news_texts(client, prompt, len(batch))
         if getattr(response, 'usage_metadata', None): stats["tokens_used"] += response.usage_metadata.total_token_count
     except Exception as e:
-        logging.error(f"❌ Помилка Gemini: {e}")
+        logging.error(f"❌ Помилка Gemini під час перекладу: {e}")
         stats["errors_count"] += 1 
+        
+        # --- ДОДАНО: Повертаємо завислі статті назад у чергу ---
+        try:
+            cursor.execute("UPDATE articles SET status = 'pending' WHERE guid = ANY(%s)", (batch_guids,))
+            conn.commit()
+            logging.info("🔄 Статуси статей повернуто на 'pending' для повторної спроби у наступному запуску.")
+        except Exception as db_err:
+            logging.error(f"Помилка повернення статусу в БД: {db_err}")
+        # ---------------------------------------------------------
+            
         cursor.close()
         conn.close()
         return
