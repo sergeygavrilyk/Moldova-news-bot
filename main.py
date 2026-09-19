@@ -427,10 +427,24 @@ def process_backlog(stats):
     cursor.execute("SELECT title FROM articles WHERE status = 'sent' ORDER BY created_at DESC LIMIT 75")
     recent_history_titles = [row[0] for row in cursor.fetchall()]
 
-    evaluated_urls = {item['url'] for item in candidate_batch}
+    # Зберігаємо ID всіх 25 новин, які ми відправили на перевірку
+    evaluated_guids = [item['guid'] for item in candidate_batch]
+    
     len_before = len(candidate_batch)
     candidate_batch = deduplicate_news(client, candidate_batch, recent_history_titles, stats)
     stats["funnel"]["duplicates_removed_by_ai"] += (len_before - len(candidate_batch))
+
+    # --- ВИПРАВЛЕННЯ БЕКЛОГУ: позначаємо відхилені новини як rejected ---
+    approved_guids = [item['guid'] for item in candidate_batch]
+    rejected_guids = [guid for guid in evaluated_guids if guid not in approved_guids]
+    
+    if rejected_guids:
+        try:
+            cursor.execute("UPDATE articles SET status = 'rejected' WHERE guid = ANY(%s)", (rejected_guids,))
+            conn.commit()
+        except Exception as db_err:
+            logging.error(f"Помилка оновлення статусу rejected: {db_err}")
+    # ---------------------------------------------------------------------
 
     batch = candidate_batch[:BATCH_SIZE]
     if not batch:
