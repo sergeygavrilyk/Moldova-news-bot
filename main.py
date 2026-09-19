@@ -353,6 +353,14 @@ def scrape_feeds(stats):
 def process_backlog(stats):
     conn = get_db_connection()
     cursor = conn.cursor()
+    
+    # --- ДОДАНО: Автоматичне очищення старого беклогу ---
+    try:
+        cursor.execute("UPDATE articles SET status = 'expired' WHERE status = 'pending' AND created_at < NOW() - INTERVAL '12 hours'")
+        conn.commit()
+    except Exception as db_err:
+        logging.error(f"Помилка очищення старого беклогу: {db_err}")
+    # ----------------------------------------------------
       
     cursor.execute("""
         SELECT a.guid, a.title, a.description, a.url, a.image_urls, s.name, EXTRACT(EPOCH FROM a.created_at) as timestamp
@@ -360,6 +368,7 @@ def process_backlog(stats):
         WHERE a.status = 'pending' ORDER BY a.created_at DESC
     """)
     rows = cursor.fetchall()
+    # ... далі код залишається без змін ...
     backlog = []
     for r in rows:
         backlog.append({
