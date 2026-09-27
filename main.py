@@ -167,7 +167,7 @@ def generate_news_texts(client, prompt, expected_count):
     # ДОДАЙТЕ ЦЕЙ РЯДОК:
     logging.info(f"Текст від Gemini:\n{response.text}")
         
-    clean_text = response.text.replace('ב', 'б').replace('є́', 'є').replace('і́', 'і')
+    clean_text = response.text.replace('ב', 'б').replace('ب', 'б').replace('є́', 'є').replace('і́', 'і')
     texts = [t.strip() for t in clean_text.strip().split('|||') if t.strip()]
     if len(texts) != expected_count: raise ValueError(f"Невірна кількість згенерованих текстів: очікували {expected_count}, отримали {len(texts)}")
     return response, texts
