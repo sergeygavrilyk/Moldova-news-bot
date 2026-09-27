@@ -294,19 +294,15 @@ def deduplicate_news(client, articles, recent_history=None, stats=None):
             if isinstance(item, dict) and 'id' in item:
                 reasons_map[int(item['id'])] = item.get('reason', 'Не вказано')
                 
-        # Прикріплюємо reasons_map до результату або повертаємо разом (зробимо через атрибут чи глобально, або повернемо кортеж)
-        # Для сумісності повернемо filtered_articles, а reasons збережемо умовно через кастомний атрибут або опрацюємо одразу
-        filtered_articles._reasons_map = reasons_map
-        
         removed_count = len(articles) - len(filtered_articles)
         if removed_count > 0: 
             logging.info(f"🗑️ Відсіяно ШІ (дублі/спам/історія): {removed_count}")  
             
-        return filtered_articles  
+        return filtered_articles, reasons_map  
         
     except Exception as e:  
         logging.error(f"❌ Помилка Gemini API у deduplicate_news: {e}. Пропускаємо фільтрацію без втрати новин.")  
-        return articles
+        return articles, {}
 
 def prioritize_ukraine_news(backlog_items):
     ukraine_keywords = [r'\bucrain', r'\bzelenski', r'\bkiev', r'\bkiiv', r'\bodesa', r'\bodessa', r'\brefugiat', r'\bprotectie temporara', r'\bprotecție temporară', r'\bprivremen\w*\s+protectie', r'\bукраин', r'\bзеленск', r'\bкиев', r'\bодесс', r'\bбеженц']
@@ -497,11 +493,8 @@ def process_backlog(stats):
     evaluated_guids = {item['guid']: item for item in candidate_batch}
     
     len_before = len(candidate_batch)
-    candidate_batch = deduplicate_news(client, candidate_batch, recent_history_titles, stats)
+    candidate_batch, reasons_map = deduplicate_news(client, candidate_batch, recent_history_titles, stats)
     stats["funnel"]["duplicates_removed_by_ai"] += (len_before - len(candidate_batch))
-
-    # Отримуємо мапу причин відхилення, яку повернув ШІ
-    reasons_map = getattr(candidate_batch, '_reasons_map', {})
 
     # --- ВИПРАВЛЕННЯ БЕКЛОГУ: позначаємо відхилені новини як rejected з причиною ---
     approved_guids = {item['guid'] for item in candidate_batch}
