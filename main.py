@@ -109,14 +109,38 @@ def extract_image_urls(entry):
 def is_quality_article(title, description, url):
     unwanted_url_categories = ['/lume/', '/sport/', '/divertisment/', '/lifestyle/', '/magazin/', '/showbiz/', '/horoscop/', '/fun/']
     if any(category in url.lower() for category in unwanted_url_categories): return False
-    unwanted_keywords = ['publicitate', 'sponsorizat', 'promo', 'horoscop', 'anunturi', 'loterie', 'castiga', 'native', 'foto', 'video', 'sport', 'fotbal', 'meci', 'tenis', 'campionat', 'liga']
+    
+    unwanted_keywords = [
+        # --- Реклама та промо (Румунські + Англійські) ---
+        'publicitate', 'sponsorizat', 'promo', 'native', 'anunturi', 'advertisement', 'sponsored',
+        
+        # --- Гороскопи та розіграші ---
+        'horoscop', 'horoscope', 'loterie', 'lottery', 'castiga', 'win', 'loto', 'anunturi',
+        
+        # --- Медіа та галереї ---
+        'foto', 'video', 'photo', 'gallery', 'galerie',
+        
+        # --- Спорт (Румунські + Англійські дисципліни та терміни) ---
+        'sport', 'fotbal', 'football', 'soccer', 
+        'meci', 'match', 'game', 
+        'tenis', 'tennis', 
+        'campionat', 'championship', 
+        'liga', 'league', 
+        'turneu', 'tournament', 
+        'judo', 'box', 'boxing', 
+        'fotbalist', 'sportiv', 'athlete', 'campion'
+    ]
+    
     text_to_check = f"{title} {description} {url}".lower()
     for word in unwanted_keywords:
         if re.search(rf'\b{word}\b', text_to_check): return False
+        
     if len(title.strip()) < 15 or len(text_to_check.strip()) < 20: return False
     if "!!!" in title or "???" in title: return False
+    
     letters = [c for c in title if c.isalpha()]
     if letters and (sum(1 for c in letters if c.isupper()) / len(letters)) > 0.4: return False
+    
     return True
 
 @retry(stop=stop_after_attempt(4), wait=wait_exponential(multiplier=2, min=5, max=60))
