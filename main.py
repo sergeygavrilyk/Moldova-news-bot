@@ -192,7 +192,7 @@ def execute_telegram_request(api_url, payload):
 
 def deduplicate_news(client, articles, recent_history=None, stats=None):
     if not articles: return articles
-    logging.info("Аналіз на дублікати (включно з історією) через Gemini...")
+    logging.info("Аналіз на дублікати та збір причин відхилення через Gemini...")
     
     history = recent_history[-75:] if recent_history else []
     prompt_data = [{"id": i, "title": a["title"], "description": a.get("description", "")} for i, a in enumerate(articles)]
@@ -237,7 +237,11 @@ def deduplicate_news(client, articles, recent_history=None, stats=None):
     {json.dumps(history, ensure_ascii=False, indent=2)}
     </HISTORY>
     
-    Поверни результат СУВОРО як масив JSON з ID новин, які треба ЗАЛИШИТИ. Більше ніякого тексту.
+    Поверни результат СУВОРО у форматі валідного JSON-об'єкта з двома ключами:
+    1. "keep": масив ID новин, які треба ЗАЛИШИТИ (наприклад, [0, 2, 5]).
+    2. "rejected": масив об'єктів для всіх інших відхилених новин, де кожен об'єкт містить "id" та коротку українську "reason" (наприклад: "Спорт", "Дублікат", "Побут іншого міста", "Вже є в історії", "Світовий шум").
+    
+    Більше ніякого тексту, тільки чистий JSON.
     """
     
     try:  
@@ -246,8 +250,6 @@ def deduplicate_news(client, articles, recent_history=None, stats=None):
             stats["tokens_used"] += response.usage_metadata.total_token_count
             
         text_response = response.text.strip()
-        
-        # ДОДАЙТЕ ЦЕЙ РЯДОК:
         logging.info(f"Відповідь Gemini (фільтрація): {text_response}")
         
         if "```json" in text_response:
@@ -255,12 +257,27 @@ def deduplicate_news(client, articles, recent_history=None, stats=None):
         elif "```" in text_response:
             text_response = text_response.split("```")[1].split("```")[0].strip()
 
-        raw_ids = json.loads(text_response)  
-        keep_ids = list(set([int(item['id']) if isinstance(item, dict) and 'id' in item else int(item) for item in raw_ids if str(item if not isinstance(item, dict) else item.get('id', '')).isdigit()]))  
+        data = json.loads(text_response)  
+        
+        keep_ids = [int(item) for item in data.get("keep", []) if str(item).isdigit()]
+        rejected_items = data.get("rejected", []) # Список об'єктів [{"id": X, "reason": "..."}, ...]
         
         filtered_articles = [articles[i] for i in keep_ids if i < len(articles)]  
-        if len(articles) - len(filtered_articles) > 0: 
-            logging.info(f"🗑️ Відсіяно ШІ (дублі/спам/історія): {len(articles) - len(filtered_articles)}")  
+        
+        # Зберігаємо відхилені товари у вигляді словника {index: reason} для подальшого запису в БД
+        reasons_map = {}
+        for item in rejected_items:
+            if isinstance(item, dict) and 'id' in item:
+                reasons_map[int(item['id'])] = item.get('reason', 'Не вказано')
+                
+        # Прикріплюємо reasons_map до результату або повертаємо разом (зробимо через атрибут чи глобально, або повернемо кортеж)
+        # Для сумісності повернемо filtered_articles, а reasons збережемо умовно через кастомний атрибут або опрацюємо одразу
+        filtered_articles._reasons_map = reasons_map
+        
+        removed_count = len(articles) - len(filtered_articles)
+        if removed_count > 0: 
+            logging.info(f"🗑️ Відсіяно ШІ (дублі/спам/історія): {removed_count}")  
+            
         return filtered_articles  
         
     except Exception as e:  
@@ -357,6 +374,19 @@ def process_backlog(stats):
     conn = get_db_connection()
     cursor = conn.cursor()
     
+    # --- ДОДАНО: Відновлення завислих у статусі 'processing' ---
+    try:
+        cursor.execute("""
+            UPDATE articles 
+            SET status = 'pending' 
+            WHERE status = 'processing' 
+              AND created_at < NOW() - INTERVAL '30 minutes'
+        """)
+        conn.commit()
+    except Exception as db_err:
+        logging.error(f"Помилка відновлення завислих processing: {db_err}")
+    # ----------------------------------------------------------
+
     # --- ДОДАНО: Автоматичне очищення старого беклогу ---
     try:
         cursor.execute("UPDATE articles SET status = 'expired' WHERE status = 'pending' AND created_at < NOW() - INTERVAL '12 hours'")
@@ -440,22 +470,35 @@ def process_backlog(stats):
     recent_history_titles = [row[0] for row in cursor.fetchall()]
 
     # Зберігаємо ID всіх 25 новин, які ми відправили на перевірку
-    evaluated_guids = [item['guid'] for item in candidate_batch]
+    evaluated_guids = {item['guid']: item for item in candidate_batch}
     
     len_before = len(candidate_batch)
     candidate_batch = deduplicate_news(client, candidate_batch, recent_history_titles, stats)
     stats["funnel"]["duplicates_removed_by_ai"] += (len_before - len(candidate_batch))
 
-    # --- ВИПРАВЛЕННЯ БЕКЛОГУ: позначаємо відхилені новини як rejected ---
-    approved_guids = [item['guid'] for item in candidate_batch]
-    rejected_guids = [guid for guid in evaluated_guids if guid not in approved_guids]
+    # Отримуємо мапу причин відхилення, яку повернув ШІ
+    reasons_map = getattr(candidate_batch, '_reasons_map', {})
+
+    # --- ВИПРАВЛЕННЯ БЕКЛОГУ: позначаємо відхилені новини як rejected з причиною ---
+    approved_guids = {item['guid'] for item in candidate_batch}
     
-    if rejected_guids:
-        try:
-            cursor.execute("UPDATE articles SET status = 'rejected' WHERE guid = ANY(%s)", (rejected_guids,))
-            conn.commit()
-        except Exception as db_err:
-            logging.error(f"Помилка оновлення статусу rejected: {db_err}")
+    for idx, item in enumerate(candidate_batch):
+        # Якщо стаття не увійшла в approved, вона відхилена
+        pass
+        
+    # Проходимо по всіх кандидатах і оновлюємо статус в БД
+    try:
+        for idx, item in enumerate(evaluated_guids.values()):
+            guid = item['guid']
+            if guid not in approved_guids:
+                reason = reasons_map.get(idx, 'ШІ фільтр (дублікат/спам)')
+                cursor.execute(
+                    "UPDATE articles SET status = 'rejected', rejection_reason = %s WHERE guid = %s",
+                    (reason, guid)
+                )
+        conn.commit()
+    except Exception as db_err:
+        logging.error(f"Помилка оновлення статусу rejected та причин: {db_err}")
     # ---------------------------------------------------------------------
 
     batch = candidate_batch[:BATCH_SIZE]
