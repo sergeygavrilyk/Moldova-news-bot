@@ -428,13 +428,56 @@ def scrape_feeds(stats):
                 stats["funnel"]["rejected_by_keywords"] += 1
                 continue
 
+            # --- 1. ГЕНЕРАЦИЯ ВЕКТОРА (EMBEDDING) ---
+            try:
+                embed_response = client.models.embed_content(
+                    model="text-embedding-004",
+                    contents=f"{title}. {description}"
+                )
+                vector = embed_response.embeddings[0].values
+                # Форматируем список в строку вектора для PostgreSQL: "[0.1, 0.2, ...]"
+                vector_str = f"[{','.join(map(str, vector))}]"
+            except Exception as e:
+                logging.error(f"Ошибка генерации вектора для {url}: {e}")
+                vector_str = None
+
+            # --- 2. ПРОВЕРКА НА СЕМАНТИЧЕСКИЙ ДУБЛИКАТ В БД (> 90%) ---
+            is_semantic_duplicate = False
+            if vector_str:
+                try:
+                    # Ищем косинусное сходство (1 - distance). 
+                    cursor.execute("""
+                        SELECT title, 1 - (embedding <=> %s::vector) AS similarity 
+                        FROM articles 
+                        WHERE created_at > NOW() - INTERVAL '3 days' 
+                          AND embedding IS NOT NULL
+                        ORDER BY embedding <=> %s::vector
+                        LIMIT 1
+                    """, (vector_str, vector_str))
+                    
+                    match = cursor.fetchone()
+                    if match and match[1] > 0.90:  # Порог 90% сходства
+                        logging.info(f"🛑 Векторный фильтр отсек дубликат (Сходство {match[1]:.2f}): {title[:40]}... -> Похоже на: {match[0][:40]}...")
+                        is_semantic_duplicate = True
+                except Exception as e:
+                    logging.error(f"Ошибка векторного поиска: {e}")
+                    conn.rollback() # Сброс транзакции при ошибке, чтобы скрипт не упал
+
+            if is_semantic_duplicate:
+                stats["funnel"]["already_seen"] += 1
+                continue
+
+            # --- 3. ЗАПИСЬ НОВОЙ СТАТЬИ И ЕЕ ВЕКТОРА ---
             images = extract_image_urls(entry)
-              
-            cursor.execute('''
-                INSERT INTO articles (guid, source_id, title, description, url, image_urls, status)
-                VALUES (%s, %s, %s, %s, %s, %s, 'pending')
-                ON CONFLICT (guid) DO NOTHING
-            ''', (guid, source_id, title, description, url, json.dumps(images)))
+            try:
+                cursor.execute('''
+                    INSERT INTO articles (guid, source_id, title, description, url, image_urls, status, embedding)
+                    VALUES (%s, %s, %s, %s, %s, %s, 'pending', %s)
+                    ON CONFLICT (guid) DO NOTHING
+                ''', (guid, source_id, title, description, url, json.dumps(images), vector_str))
+            except Exception as e:
+                logging.error(f"Ошибка записи в БД: {e}")
+                conn.rollback()
               
             db_urls.add(url)
             db_titles.add(title)
