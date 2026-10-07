@@ -468,7 +468,7 @@ def process_backlog(stats):
             # Зустріли першу не-українську новину — далі йдуть інші, виходимо з циклу пріоритету
             break
                   
-    while len(candidate_batch) < 25:
+    while len(candidate_batch) < 40:
         added_this_round = False
         for src in ordered_sources:
             for item in backlog:
@@ -477,10 +477,10 @@ def process_backlog(stats):
                     used_urls.add(item['url'])
                     added_this_round = True
                     break 
-            if len(candidate_batch) >= 25: break
+            if len(candidate_batch) >= 40: break
         if not added_this_round: break 
               
-    candidate_batch = candidate_batch[:25]
+    candidate_batch = candidate_batch[:40]
     if not candidate_batch:
         cursor.close()
         conn.close()
@@ -489,7 +489,7 @@ def process_backlog(stats):
     cursor.execute("SELECT title FROM articles WHERE status = 'sent' ORDER BY created_at DESC LIMIT 75")
     recent_history_titles = [row[0] for row in cursor.fetchall()]
 
-    # Зберігаємо ID всіх 25 новин, які ми відправили на перевірку
+    # Зберігаємо ID всіх 40 новин, які ми відправили на перевірку
     evaluated_guids = {item['guid']: item for item in candidate_batch}
     
     len_before = len(candidate_batch)
