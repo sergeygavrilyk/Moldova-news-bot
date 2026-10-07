@@ -145,56 +145,97 @@ def is_quality_article(title, description, url):
 
 @retry(stop=stop_after_attempt(4), wait=wait_exponential(multiplier=2, min=5, max=60))
 def call_gemini_json(client, prompt):
-    # Додано температуру 0.0 та відключення фільтрів безпеки
-    response = client.models.generate_content(
-        model='gemini-3.5-flash-lite', 
-        contents=prompt, 
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-            temperature=0.0,
-            safety_settings=[
-                types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
-                types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
-                types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
-                types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE"),
-            ]
-        )
-    )
+    # Пріоритет: спочатку розумна, потім швидка
+    models_to_try = ['gemini-3.5-flash', 'gemini-3.5-flash-lite']
+    last_error = None
     
-    # ЗАХИСТ: Якщо Gemini повернув порожнечу замість JSON, викликаємо помилку для ретраю
-    if not response or not getattr(response, 'text', None):
-        raise ValueError("Gemini повернув порожню відповідь (None) для JSON. Спрацьовує ретрай.")
-        
-    return response
+    for current_model in models_to_try:
+        try:
+            response = client.models.generate_content(
+                model=current_model, 
+                contents=prompt, 
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    temperature=0.0,
+                    safety_settings=[
+                        types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
+                        types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
+                        types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
+                        types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE"),
+                    ]
+                )
+            )
+            
+            # ЗАХИСТ: Перевірка на порожню відповідь
+            if not response or not getattr(response, 'text', None):
+                raise ValueError(f"Порожня відповідь (None) з моделі {current_model}")
+                
+            # Якщо успіх — одразу повертаємо результат
+            return response
+            
+        except Exception as e:
+            logging.warning(f"⚠️ Дедуплікація: Модель {current_model} недоступна ({e}). Перемикаємось...")
+            last_error = e
+            time.sleep(5)  # Коротка пауза перед запасною моделлю
+            
+    # Якщо обидві моделі впали, викликаємо фінальну помилку.
+    # Її підхопить @retry (tenacity) і відправить скрипт на тривалий сон (від 5 до 60 сек).
+    raise last_error
 
 @retry(stop=stop_after_attempt(4), wait=wait_exponential(multiplier=2, min=15, max=60))
 def generate_news_texts(client, prompt, expected_count):
-    # Додано відключення фільтрів безпеки для текстів
-    response = client.models.generate_content(
-        model='gemini-3.5-flash-lite', 
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            temperature=0.0, # <--- ДОДАЄМО ЦЕ ДЛЯ ЗНИЖЕННЯ ГАЛЮЦИНАЦІЙ
-            safety_settings=[
-                types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
-                types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
-                types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
-                types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE"),
-            ]
-        )
-    )
+    # Пріоритет для перекладу: спочатку швидка, потім розумна
+    models_to_try = ['gemini-3.5-flash-lite', 'gemini-3.5-flash']
+    last_error = None
     
-    # ЗАХИСТ ВІД ПОРОЖНЬОЇ ВІДПОВІДІ (Safety Filters / Збій API)
-    if not response or not getattr(response, 'text', None):
-        raise ValueError("Gemini повернув порожню відповідь (None). Спрацьовує ретрай.")
-        
-    # ДОДАЙТЕ ЦЕЙ РЯДОК:
-    logging.info(f"Текст від Gemini:\n{response.text}")
-        
-    clean_text = response.text.replace('ב', 'б').replace('ب', 'б').replace('є́', 'є').replace('і́', 'і')
-    texts = [t.strip() for t in clean_text.strip().split('|||') if t.strip()]
-    if len(texts) != expected_count: raise ValueError(f"Невірна кількість згенерованих текстів: очікували {expected_count}, отримали {len(texts)}")
-    return response, texts
+    for current_model in models_to_try:
+        try:
+            response = client.models.generate_content(
+                model=current_model, 
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    temperature=0.0,
+                    safety_settings=[
+                        types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
+                        types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
+                        types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
+                        types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE"),
+                    ]
+                )
+            )
+            
+            if not response or not getattr(response, 'text', None):
+                raise ValueError(f"Порожня відповідь від {current_model}")
+                
+            logging.info(f"Текст від Gemini ({current_model}):\n{response.text}")
+                
+            # --- ЖОРСТКЕ ВИДАЛЕННЯ ГАЛЮЦИНАЦІЙ ШІ ---
+            HOMOGLYPHS = {
+                'ά': 'а', 'α': 'а', 'ό': 'о', 'ο': 'о', 
+                'έ': 'е', 'ε': 'е', 'ί': 'і', 'ι': 'і', 
+                'ή': 'и', 'η': 'и', 'ν': 'н', 'Ν': 'Н',
+                'ב': 'б', 'ب': 'б',
+                'є́': 'є', 'і́': 'і'
+            }
+            
+            clean_text = response.text
+            for bad_char, good_char in HOMOGLYPHS.items():
+                clean_text = clean_text.replace(bad_char, good_char)
+                
+            texts = [t.strip() for t in clean_text.strip().split('|||') if t.strip()]
+            
+            if len(texts) != expected_count: 
+                raise ValueError(f"Невірна кількість текстів від {current_model}: очікували {expected_count}, отримали {len(texts)}")
+                
+            return response, texts
+            
+        except Exception as e:
+            logging.warning(f"⚠️ Переклад: Модель {current_model} недоступна ({e}). Перемикаємось...")
+            last_error = e
+            time.sleep(5)
+            
+    # Якщо обидві моделі впали, віддаємо помилку декоратору @retry
+    raise last_error
 
 @retry(stop=stop_after_attempt(4), wait=wait_exponential(multiplier=2, min=3, max=30))
 def execute_telegram_request(api_url, payload):
@@ -624,8 +665,7 @@ def process_backlog(stats):
     conn.close()
 
 def send_to_telegram(text, url, source_name, image_urls=None, tags=""):
-    # 1. ФІКС ГАЛЮЦИНАЦІЙ (з Хорватського)
-    text = text.replace('ב', 'б').replace('ب', 'б').replace('є́', 'є').replace('і́', 'і')
+   
     
     # 2. РОЗУМНЕ ВИТЯГУВАННЯ ХЕШТЕГІВ (з Хорватського)
     extracted_tags = ""
