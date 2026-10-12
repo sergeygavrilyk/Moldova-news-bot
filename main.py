@@ -156,7 +156,7 @@ def is_quality_article(title, description, url):
 @retry(stop=stop_after_attempt(4), wait=wait_exponential(multiplier=2, min=5, max=60))
 def call_gemini_json(client, prompt):
     # Пріоритет: спочатку розумна, потім швидка
-    models_to_try = ['gemini-3.5-flash', 'gemini-3.5-flash-lite']
+    models_to_try = ['gemini-3.6-flash', 'gemini-3.5-flash-lite']
     last_error = None
     
     for current_model in models_to_try:
@@ -196,7 +196,7 @@ def call_gemini_json(client, prompt):
 @retry(stop=stop_after_attempt(4), wait=wait_exponential(multiplier=2, min=15, max=60))
 def generate_news_texts(client, prompt, expected_count):
     # Пріоритет для перекладу: спочатку швидка, потім розумна
-    models_to_try = ['gemini-3.5-flash-lite', 'gemini-3.5-flash']
+    models_to_try = ['gemini-3.5-flash-lite', 'gemini-3.6-flash']
     last_error = None
     
     for current_model in models_to_try:
