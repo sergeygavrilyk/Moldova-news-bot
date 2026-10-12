@@ -104,16 +104,19 @@ def get_active_sources():
         return []
 
 def extract_image_urls(entry):
+    unsupported_formats = ('.webp', '.avif', '.svg')
     urls = []
     if 'media_content' in entry:
         for media in entry.media_content:
             url = media.get('url')
-            if url and url not in urls: urls.append(url)
+            if url and not url.lower().endswith(unsupported_formats) and url not in urls: 
+                urls.append(url)
     if 'enclosures' in entry:
         for enc in entry.enclosures:
             if enc.get('type', '').startswith('image/'):
                 url = enc.get('href')
-                if url and url not in urls: urls.append(url)
+                if url and not url.lower().endswith(unsupported_formats) and url not in urls: 
+                    urls.append(url)
     return urls[:10]
 
 def is_quality_article(title, description, url):
@@ -248,7 +251,7 @@ def generate_news_texts(client, prompt, expected_count):
     # Якщо обидві моделі впали, віддаємо помилку декоратору @retry
     raise last_error
 
-@retry(stop=stop_after_attempt(4), wait=wait_exponential(multiplier=2, min=3, max=30))
+@retry(stop=stop_after_attempt(4), wait=wait_exponential(multiplier=2, min=3, max=30), reraise=True)
 def execute_telegram_request(api_url, payload):
     resp = requests.post(api_url, data=payload)
     
@@ -296,14 +299,14 @@ def deduplicate_news(client, articles, recent_history=None, stats=None):
     КРОК 4. СТОП-ТЕМИ (ЩО БЕЗЖАЛЬНО ВІДХИЛЯТИ): 
     1. СПОРТ: Будь-які матчі, турніри, результати, трансфери, спортсмени.
     2. РЕКЛАМА: Спонсорські матеріали, промо-акції, розіграші.
-    3. СВІТОВИЙ ШУМ ТА ЛАЙФСТАЙЛ: Абстрактна наука (як-от дослідження Гарварда), поради дієтологів, рецепти, психологія, шоу-бізнес та події в третіх країнах, ЯКЩО вони не стосуються безпосередньо Хорватії чи України.
+    3. СВІТОВИЙ ШУМ ТА ЛАЙФСТАЙЛ: Абстрактна наука (як-от дослідження Гарварда), поради дієтологів, рецепти, психологія та події в третіх країнах, ЯКЩО вони не стосуються безпосередньо Молдови чи України.
 
     КРОК 5. ТЕМАТИКА (ЩО ЗАЛИШИТИ): 
     Залишай ТІЛЬКИ ті новини, які пройшли Кроки 1-4 і належать до однієї з чотирьох категорій:
     1. ВАЖЛИВІ МОЛДОВСЬКІ НОВИНИ: Будь-які резонансні події всередині Молдови (кримінал, надзвичайні ситуації, політика, економіка, суспільство, а також культура та цікаві технологічні новини) — НАВІТЬ ЯКЩО там не згадуються українці. Це основа каналу.
     2. УКРАЇНЦІ В МОЛДОВІ: Події всередині країни, пов'язані з діаспорою, статусом захисту, кордоном, виплатами чи допомогою.
     3. ЄВРОПЕЙСЬКІ ТА СВІТОВІ РІШЕННЯ: Документи, закони та допомога, що безпосередньо впливають на ситуацію в Молдові чи на українців у ній. Оновлення по рішенню ЄС (Директива 2001/55). Виплати українцям та правила перетину кордону.
-    4. ВАЖЛИВЕ В УКРАЇНІ: Головні події на Батьківщині (заяви перших осіб, стан енергосистеми та зв'язку, хід бойових дій), які хвилюють діаспору.
+    4. ВАЖЛИВЕ В УКРАЇНІ: Головні події на Батьківщині (заяви перших осіб, стан енергосистеми та зв'язку, хід бойових дій, війна, енергетика, економіка, життя, політика, технології, оборона), які хвилюють діаспору.
 
     <CANDIDATES>
     {json.dumps(prompt_data, ensure_ascii=False, indent=2)}
@@ -655,12 +658,14 @@ def process_backlog(stats):
     prompt += f"""
     Для кожної новини виконай наступні вимоги:
     
-    1. ЗАГОЛОВОК: Зроби привабливий, змістовний заголовок (обов'язково виділений тегами <b>).
+    1. ЗАГОЛОВОК: Переклади оригінальний заголовок максимально точно та близько до тексту. КАТЕГОРИЧНО ЗАБОРОНЕНО вигадувати від себе "креатив", метафори чи клікбейт. Заголовок має бути обов'язково виділений тегами <b>.
     
-    2. ОБ'ЄМ ТА КОНТЕКСТ:
-       - Якщо "Має картинку: Так" -> напиши лаконічний текст ДО 900 символів. Якщо суть події повністю розкрита за 500-600 символів — зупинись, не "лий воду" і не розтягуй штучно.
-       - Якщо "Має картинку: Ні" -> напиши розширений текст ДО 2500 символів.
-       УВАГА: Розширюй текст ВИКЛЮЧНО за рахунок пояснення контексту події та її значення. КАТЕГОРИЧНО ЗАБОРОНЕНО вигадувати неіснуючі імена, цитати, точні цифри чи дати, яких не було в оригіналі.
+    2. ОБ'ЄМ ТА ПРЯМИЙ ПЕРЕКЛАД (АНТИ-ВОДА):
+       - Твоє головне завдання — ПРЯМИЙ ПЕРЕКЛАД наявного тексту. Якщо в оригіналі лише 300 символів — переклади ці 300 символів і зупинись. КАТЕГОРИЧНО ЗАБОРОНЕНО штучно розтягувати текст, додавати "воду", висновки чи контекст, якого немає в оригіналі.
+       - ЛІМІТИ ТЕЛЕГРАМА: 
+         Якщо "Має картинку: Так" -> суворий ліміт 900 символів. Якщо оригінал довший, стисни головну суть, щоб влізти в цей ліміт.
+         Якщо "Має картинку: Ні" -> суворий ліміт 2500 символів. Якщо оригінал довший, передай головну суть до цього ліміту.
+       - ОБРІЗАНИЙ ТЕКСТ В RSS: Іноді текст обривається на півслові або закінчується трьома крапками (...) через ліміти сайтів. Якщо бачиш обірване речення в кінці — просто видали його або заверши логічно. КАТЕГОРИЧНО ЗАБОРОНЕНО друкувати фрази з трьома крапками (наприклад, "Вулиця ..."). КАТЕГОРИЧНО ЗАБОРОНЕНО вигадувати неіснуючі імена, цитати, точні цифри чи дати, яких не було в оригіналі.
        
     3. СТРУКТУРА: Дроби текст на короткі абзаци (по 3-4 речення). Для розширених текстів використовуй марковані списки (з символом • або -).
     
@@ -771,32 +776,23 @@ def send_to_telegram(text, url, source_name, image_urls=None, tags=""):
         payload['media'] = json.dumps(media)
         api_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMediaGroup"
 
-    # 4. ЗАХИСТ ВІД ЗЛАМАНОГО HTML (Адаптовано з Хорватського для execute_telegram_request)
+    # 4. ВІДПРАВКА ТА ЗАХИСТ ВІД ЗЛАМАНОГО HTML
     try: 
-        # Якщо у вас є execute_telegram_request, залишаємо його виклик:
-        # return execute_telegram_request(api_url, payload)
-        
-        # АБО якщо використовуємо requests напряму (що краще для перехоплення помилок HTML):
-        resp = requests.post(api_url, data=payload)
-        
-        if resp.status_code == 400 and "parse entities" in resp.text.lower():
-            logging.warning("⚠️ Помилка HTML-розмітки. Відправляємо без HTML...")
-            if len(image_urls) > 1:
-                media_data = json.loads(payload['media'])
-                if 'parse_mode' in media_data[0]: del media_data[0]['parse_mode']
-                payload['media'] = json.dumps(media_data)
-            elif 'parse_mode' in payload:
-                del payload['parse_mode']
-            resp = requests.post(api_url, data=payload)
-            
-        if resp.status_code != 200:
-            logging.error(f"❌ Telegram відхилив повідомлення: {resp.text}")
-            
-        return resp.status_code == 200
-        
+        return execute_telegram_request(api_url, payload)
     except Exception as e: 
-        logging.error(f"❌ Telegram API: {e}")
-        return False
+        # ФОЛБЕК: Якщо відхилено фото/медіагрупу, відправляємо як голий текст
+        if len(image_urls) > 0:
+            logging.warning(f"⚠️ Telegram відхилив медіа ({e}). Відправляємо як текст...")
+            payload_text = {'chat_id': TELEGRAM_CHANNEL_ID, 'text': full_message, 'parse_mode': 'HTML'}
+            api_url_text = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+            try:
+                return execute_telegram_request(api_url_text, payload_text)
+            except Exception as text_e:
+                logging.error(f"❌ Критична помилка відправки тексту: {text_e}")
+                return False
+        else:
+            logging.error(f"❌ Критична помилка Telegram API: {e}")
+            return False
 
 def main():
     # Перевіряємо токени тут, коли скрипт безпосередньо запускається
