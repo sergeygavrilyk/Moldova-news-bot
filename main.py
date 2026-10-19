@@ -233,6 +233,8 @@ def generate_news_texts(client, prompt, expected_count):
             }
             
             clean_text = response.text
+            clean_text = clean_text.replace('\u0301', '') # Видалення невидимого наголосу
+            
             for bad_char, good_char in HOMOGLYPHS.items():
                 clean_text = clean_text.replace(bad_char, good_char)
                 
@@ -434,7 +436,7 @@ def scrape_feeds(stats):
             # --- 1. ГЕНЕРАЦИЯ ВЕКТОРА (EMBEDDING) ---
             try:
                 embed_response = client.models.embed_content(
-                    model="text-embedding-004",
+                    model="gemini-embedding-001",
                     contents=f"{title}. {description}"
                 )
                 vector = embed_response.embeddings[0].values
