@@ -90,11 +90,13 @@
 
 | Завдання | Моделі за замовчуванням (по черзі) | Змінна GitHub Variables |
 |---|---|---|
-| Фільтр/дедуплікація (JSON) | `gemini-3.5-flash-lite` → `gemini-3.1-flash-lite` | `GEMINI_FILTER_MODELS` |
+| Фільтр/дедуплікація (JSON) | `gemini-3-flash-preview` → `gemini-3.5-flash-lite` → `gemini-3.1-flash-lite` (з PR #14) | `GEMINI_FILTER_MODELS` |
 | Переклад | `gemini-3.8-flash` → `gemini-3.6-flash` → `gemini-3.5-flash-lite` (останній резерв) | `GEMINI_TRANSLATE_MODELS` |
 | Ембединги | `gemini-embedding-001` (без повторів; помилка → стаття без вектора) | — |
 
 Таймаут кожного запиту — 180 с (`HttpOptions(timeout=180_000)`); «зависла» модель = збій, каскад іде далі.
+
+**Знято з обігу 08.10.2026:** `gemini-3.5-flash` (переадресація на `3.6-flash`) і `gemini-3.7-flash` (на `3.8-flash`) — не використовувати: фактично витрачають квоту інших моделей. `gemini-3.1-flash-lite` — відключення не раніше 07.05.2027.
 
 Результати перевірки 30.10.2026: працюють 3.6-flash, 3.5-flash, 3-flash-preview, 3.5-flash-lite, 3.1-flash-lite; 3.8-flash періодично 503; 3.7-flash — таймаут; 2.5-flash і 2.5-flash-lite — 404 для нових ключів.
 

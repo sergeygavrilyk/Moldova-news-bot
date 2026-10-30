@@ -66,8 +66,12 @@ client = genai.Client(api_key=GEMINI_API_KEY, http_options=types.HttpOptions(tim
 # Змінити без правки коду: GitHub -> Settings -> Secrets and variables -> Actions -> Variables
 # (GEMINI_FILTER_MODELS / GEMINI_TRANSLATE_MODELS, назви через кому).
 # Перевірено 30.10.2026 (workflow "Check Gemini models"): gemini-2.5-flash / 2.5-flash-lite — 404 для нових ключів,
-# gemini-3.7-flash — таймаут, gemini-3.8-flash — періодично 503 (перевантаження).
-DEFAULT_FILTER_MODELS = "gemini-3.5-flash-lite,gemini-3.1-flash-lite"
+# gemini-3.8-flash — періодично 503 (перевантаження).
+# Знято з обігу 08.10.2026 (docs/deprecations): gemini-3.5-flash -> переадресація на 3.6-flash,
+# gemini-3.7-flash -> на 3.8-flash — НЕ використовувати (фактично витрачають квоту інших моделей).
+# Фільтр: gemini-3-flash-preview (окрема flash-модель, не перетинається з моделями перекладу) -> lite як резерв.
+# gemini-3.1-flash-lite: відключення не раніше 07.05.2027.
+DEFAULT_FILTER_MODELS = "gemini-3-flash-preview,gemini-3.5-flash-lite,gemini-3.1-flash-lite"
 DEFAULT_TRANSLATE_MODELS = "gemini-3.8-flash,gemini-3.6-flash,gemini-3.5-flash-lite"
 
 def parse_models(env_name, default):
@@ -195,7 +199,7 @@ def send_analytics_to_admin(stats):
             f"▪️ Відсіяно Gemini: {stats['funnel']['duplicates_removed_by_ai']}"
             f"{(' — ' + ', '.join(f'{k} {v}' for k, v in sorted(stats['funnel'].get('rejected_reasons', {}).items(), key=lambda kv: -kv[1]))) if stats['funnel'].get('rejected_reasons') else ''}\n\n"
             f"📥 <b>Беклог (очікують ШІ-валідації: {stats['backlog']['total_size']}):</b>\n▪️ {backlog_src_str}\n\n"
-            f"✅ <b>Опубліковано: {stats['published']['total']}</b>\n"
+            f"✅ <b>{'Підготовлено (тест, не опубліковано)' if DRY_RUN else 'Опубліковано'}: {stats['published']['total']}</b>\n"
             f"▪️ Формат: З фото ({stats['published']['with_images']}; фото знайдено на сторінках статей: {stats['published'].get('og_images_found', 0)}) | Текст ({stats['published']['text_only']})\n"
             f"▪️ Пріоритет 🇺🇦: {stats['published']['ukraine_priority']}\n▪️ Джерела: {pub_src_str}"
         )
@@ -1083,6 +1087,14 @@ def send_admin_html(html_text):
         logging.error(f"Не вдалося надіслати повідомлення адміну: {_mask_token(e)}")
         return False
 
+def _short(text, limit):
+    """Скорочує рядок по межі слова (для звітів)."""
+    text = str(text or '')
+    if len(text) <= limit:
+        return text
+    cut = text[:limit].rsplit(' ', 1)[0]
+    return (cut if len(cut) > limit * 0.6 else text[:limit]).rstrip(' ,.;:') + '…'
+
 def send_dry_run_filter_report(evaluated, approved_guids, reasons_map, kept_ordered):
     """DRY_RUN: що фільтр залишив і що відкинув (з категоріями) — щоб оцінити зміни промпту."""
     esc = lambda s: html_lib.escape(str(s or ''), quote=False)
@@ -1090,22 +1102,36 @@ def send_dry_run_filter_report(evaluated, approved_guids, reasons_map, kept_orde
              f"✅ <b>Залишено {len(kept_ordered)}</b> (у пости підуть перші {BATCH_SIZE}):"]
     for i, item in enumerate(kept_ordered):
         mark = "🔄 " if item.get('is_update') else ""
-        lines.append(f"{i + 1}. {mark}{esc(item['title'][:110])} <i>({esc(item.get('source'))})</i>")
+        lines.append(f"{i + 1}. {mark}{esc(_short(item['title'], 110))} <i>({esc(item.get('source'))})</i>")
     lines += ["", "✖ <b>Відкинуто:</b>"]
     for idx, item in enumerate(evaluated):
         if item['guid'] not in approved_guids:
-            lines.append(f"• [{esc(reasons_map.get(idx, NO_REASON))}] {esc(item['title'][:100])}")
+            lines.append(f"• [{esc(reasons_map.get(idx, NO_REASON))}] {esc(_short(item['title'], 100))}")
     send_admin_html("\n".join(lines))
+
+_TRAILING_HASHTAGS_RE = re.compile(r'(?:\s*#[^\s#<>]+)+\s*$')
+
+def split_trailing_hashtags(text):
+    """Відокремлює хештеги в самому кінці тексту (хоч в один рядок, хоч кожен з нового).
+    Повертає (текст без хештегів, «#тег1 #тег2» одним рядком). Якщо «хештегів» підозріло
+    багато (> 200 символів) — нічого не відокремлює."""
+    match = _TRAILING_HASHTAGS_RE.search(text or '')
+    if not match or len(match.group(0)) > 200:
+        return (text or '').rstrip(), ''
+    hashtags = ' '.join(re.findall(r'#[^\s#<>]+', match.group(0)))
+    return text[:match.start()].rstrip(), hashtags
+
+def visible_len(html_text):
+    """Довжина тексту так, як її рахує Telegram (без HTML-тегів, сутності — один символ)."""
+    return len(html_lib.unescape(re.sub(r'<[^>]+>', '', html_text or '')))
 
 def send_to_telegram(text, url, source_name, image_urls=None, tags=""):
    
     
-    # 2. РОЗУМНЕ ВИТЯГУВАННЯ ХЕШТЕГІВ (з Хорватського)
-    extracted_tags = ""
-    parts = text.split('\n\n')
-    if parts and '#' in parts[-1]:
-        extracted_tags = "\n\n" + parts[-1].strip()
-        text = '\n\n'.join(parts[:-1]) # Залишаємо основний текст без хештегів
+    # 2. ХЕШТЕГИ В КІНЦІ ТЕКСТУ (D-22): беремо лише самі хештеги, а не весь останній абзац —
+    # модель інколи ставить їх з нового рядка без порожнього рядка, і тоді «абзацом» ставав увесь текст
+    text, hashtags = split_trailing_hashtags(text)
+    extracted_tags = f"\n\n{hashtags}" if hashtags else ""
 
     # Обробка списку зображень (з Молдовського)
     if not image_urls: image_urls = []
@@ -1116,28 +1142,26 @@ def send_to_telegram(text, url, source_name, image_urls=None, tags=""):
     # D-12: текст від Gemini — у безпечний HTML (екранування & < >, закриті теги)
     text = sanitize_telegram_html(text)
     extracted_tags = sanitize_telegram_html(extracted_tags)
-    
-    # 3. ДИНАМІЧНИЙ ЛІМІТ з урахуванням витягнутих хештегів
-    safe_caption_limit = 920 - len(extracted_tags) - len(tags)
-    
-    # D-12: обрізаємо по межі речення/слова, не розриваючи теги (поріг — як раніше,
-    # місце під «Деталі за посиланням» віднімаємо лише з обрізаного тексту)
-    if image_urls and len(text) > safe_caption_limit: 
-        text = crop_html(text, safe_caption_limit - len(crop_msg)) + crop_msg
-    elif not image_urls and len(text) > 3900: 
-        text = crop_html(text, 3900 - len(crop_msg)) + crop_msg
-    
-    # Збираємо повідомлення назад: текст + згенеровані хештеги + статичні теги
+
     # D-19: URL і назва джерела — з екрануванням
     safe_url = html_lib.escape(url or '', quote=True)
     safe_source = html_lib.escape(source_name or 'Джерело', quote=False)
-    full_message = f"{text}{extracted_tags}{tags}\n\n🔗 Джерело: <a href=\"{safe_url}\">{safe_source}</a>"
-    
-    if DRY_RUN:
-        full_message = DRY_RUN_HEADER + full_message
-        if not ADMIN_CHAT_ID:
-            logging.info(f"🧪 DRY_RUN (ADMIN_CHAT_ID не задано) — пост лише в лозі:\n{full_message}")
-            return True
+    footer = f"{extracted_tags}{tags}\n\n🔗 Джерело: <a href=\"{safe_url}\">{safe_source}</a>"
+    header = DRY_RUN_HEADER if DRY_RUN else ""
+
+    # 3. ЛІМІТ ТЕКСТУ (D-22): Telegram рахує видимі символи — підпис до фото ≤ 1024, повідомлення ≤ 4096.
+    # Бюджет тексту = ліміт (із запасом) − шапка − хештеги − «Джерело»; не менше 300 символів.
+    total_limit = 1000 if image_urls else 4000
+    budget = max(total_limit - visible_len(header) - visible_len(footer), 300)
+    if visible_len(text) > budget:
+        # crop_html рахує символи разом із тегами, тож видимий текст гарантовано вкладеться
+        text = crop_html(text, budget - visible_len(crop_msg)) + crop_msg
+
+    full_message = f"{header}{text}{footer}"
+
+    if DRY_RUN and not ADMIN_CHAT_ID:
+        logging.info(f"🧪 DRY_RUN (ADMIN_CHAT_ID не задано) — пост лише в лозі:\n{full_message}")
+        return True
 
     payload = {'chat_id': target_chat_id()}
     
