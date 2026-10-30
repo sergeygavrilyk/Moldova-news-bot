@@ -1109,15 +1109,29 @@ def send_dry_run_filter_report(evaluated, approved_guids, reasons_map, kept_orde
             lines.append(f"• [{esc(reasons_map.get(idx, NO_REASON))}] {esc(_short(item['title'], 100))}")
     send_admin_html("\n".join(lines))
 
+_TRAILING_HASHTAGS_RE = re.compile(r'(?:\s*#[^\s#<>]+)+\s*$')
+
+def split_trailing_hashtags(text):
+    """Відокремлює хештеги в самому кінці тексту (хоч в один рядок, хоч кожен з нового).
+    Повертає (текст без хештегів, «#тег1 #тег2» одним рядком). Якщо «хештегів» підозріло
+    багато (> 200 символів) — нічого не відокремлює."""
+    match = _TRAILING_HASHTAGS_RE.search(text or '')
+    if not match or len(match.group(0)) > 200:
+        return (text or '').rstrip(), ''
+    hashtags = ' '.join(re.findall(r'#[^\s#<>]+', match.group(0)))
+    return text[:match.start()].rstrip(), hashtags
+
+def visible_len(html_text):
+    """Довжина тексту так, як її рахує Telegram (без HTML-тегів, сутності — один символ)."""
+    return len(html_lib.unescape(re.sub(r'<[^>]+>', '', html_text or '')))
+
 def send_to_telegram(text, url, source_name, image_urls=None, tags=""):
    
     
-    # 2. РОЗУМНЕ ВИТЯГУВАННЯ ХЕШТЕГІВ (з Хорватського)
-    extracted_tags = ""
-    parts = text.split('\n\n')
-    if parts and '#' in parts[-1]:
-        extracted_tags = "\n\n" + parts[-1].strip()
-        text = '\n\n'.join(parts[:-1]) # Залишаємо основний текст без хештегів
+    # 2. ХЕШТЕГИ В КІНЦІ ТЕКСТУ (D-22): беремо лише самі хештеги, а не весь останній абзац —
+    # модель інколи ставить їх з нового рядка без порожнього рядка, і тоді «абзацом» ставав увесь текст
+    text, hashtags = split_trailing_hashtags(text)
+    extracted_tags = f"\n\n{hashtags}" if hashtags else ""
 
     # Обробка списку зображень (з Молдовського)
     if not image_urls: image_urls = []
@@ -1128,28 +1142,26 @@ def send_to_telegram(text, url, source_name, image_urls=None, tags=""):
     # D-12: текст від Gemini — у безпечний HTML (екранування & < >, закриті теги)
     text = sanitize_telegram_html(text)
     extracted_tags = sanitize_telegram_html(extracted_tags)
-    
-    # 3. ДИНАМІЧНИЙ ЛІМІТ з урахуванням витягнутих хештегів
-    safe_caption_limit = 920 - len(extracted_tags) - len(tags)
-    
-    # D-12: обрізаємо по межі речення/слова, не розриваючи теги (поріг — як раніше,
-    # місце під «Деталі за посиланням» віднімаємо лише з обрізаного тексту)
-    if image_urls and len(text) > safe_caption_limit: 
-        text = crop_html(text, safe_caption_limit - len(crop_msg)) + crop_msg
-    elif not image_urls and len(text) > 3900: 
-        text = crop_html(text, 3900 - len(crop_msg)) + crop_msg
-    
-    # Збираємо повідомлення назад: текст + згенеровані хештеги + статичні теги
+
     # D-19: URL і назва джерела — з екрануванням
     safe_url = html_lib.escape(url or '', quote=True)
     safe_source = html_lib.escape(source_name or 'Джерело', quote=False)
-    full_message = f"{text}{extracted_tags}{tags}\n\n🔗 Джерело: <a href=\"{safe_url}\">{safe_source}</a>"
-    
-    if DRY_RUN:
-        full_message = DRY_RUN_HEADER + full_message
-        if not ADMIN_CHAT_ID:
-            logging.info(f"🧪 DRY_RUN (ADMIN_CHAT_ID не задано) — пост лише в лозі:\n{full_message}")
-            return True
+    footer = f"{extracted_tags}{tags}\n\n🔗 Джерело: <a href=\"{safe_url}\">{safe_source}</a>"
+    header = DRY_RUN_HEADER if DRY_RUN else ""
+
+    # 3. ЛІМІТ ТЕКСТУ (D-22): Telegram рахує видимі символи — підпис до фото ≤ 1024, повідомлення ≤ 4096.
+    # Бюджет тексту = ліміт (із запасом) − шапка − хештеги − «Джерело»; не менше 300 символів.
+    total_limit = 1000 if image_urls else 4000
+    budget = max(total_limit - visible_len(header) - visible_len(footer), 300)
+    if visible_len(text) > budget:
+        # crop_html рахує символи разом із тегами, тож видимий текст гарантовано вкладеться
+        text = crop_html(text, budget - visible_len(crop_msg)) + crop_msg
+
+    full_message = f"{header}{text}{footer}"
+
+    if DRY_RUN and not ADMIN_CHAT_ID:
+        logging.info(f"🧪 DRY_RUN (ADMIN_CHAT_ID не задано) — пост лише в лозі:\n{full_message}")
+        return True
 
     payload = {'chat_id': target_chat_id()}
     
