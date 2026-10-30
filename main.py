@@ -7,9 +7,10 @@ import time
 import calendar
 import json
 import re
+import html as html_lib
 import random
 import psycopg2
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types  # ДОДАНО ДЛЯ SAFETY SETTINGS
@@ -140,7 +141,7 @@ def send_analytics_to_admin(stats):
             f"▪️ Відсіяно Gemini (дублі/історія): {stats['funnel']['duplicates_removed_by_ai']}\n\n"
             f"📥 <b>Беклог (очікують ШІ-валідації: {stats['backlog']['total_size']}):</b>\n▪️ {backlog_src_str}\n\n"
             f"✅ <b>Опубліковано: {stats['published']['total']}</b>\n"
-            f"▪️ Формат: З фото ({stats['published']['with_images']}) | Текст ({stats['published']['text_only']})\n"
+            f"▪️ Формат: З фото ({stats['published']['with_images']}; фото знайдено на сторінках статей: {stats['published'].get('og_images_found', 0)}) | Текст ({stats['published']['text_only']})\n"
             f"▪️ Пріоритет 🇺🇦: {stats['published']['ukraine_priority']}\n▪️ Джерела: {pub_src_str}"
         )
         
@@ -162,8 +163,10 @@ def get_active_sources():
         logging.error(f"Помилка читання PostgreSQL: {e}")
         return []
 
+UNSUPPORTED_IMAGE_FORMATS = ('.webp', '.avif', '.svg')  # Telegram їх не приймає як фото
+
 def extract_image_urls(entry):
-    unsupported_formats = ('.webp', '.avif', '.svg')
+    unsupported_formats = UNSUPPORTED_IMAGE_FORMATS
     urls = []
     if 'media_content' in entry:
         for media in entry.media_content:
@@ -177,6 +180,36 @@ def extract_image_urls(entry):
                 if url and not url.lower().endswith(unsupported_formats) and url not in urls: 
                     urls.append(url)
     return urls[:10]
+
+# --- Фото зі сторінки статті (og:image), якщо в RSS картинки немає ---
+_OG_META_RE = re.compile(r'<meta\b[^>]*?\b(?:property|name)\s*=\s*["\'](?:og:image|og:image:url|twitter:image)["\'][^>]*>', re.I)
+_CONTENT_RE = re.compile(r'\bcontent\s*=\s*["\']([^"\']+)["\']', re.I)
+
+def find_og_image(page_html, page_url):
+    """Головне зображення статті з meta og:image / twitter:image.
+    Пропускає непідтримувані Telegram формати і явні логотипи сайту."""
+    for tag in _OG_META_RE.findall(page_html[:300000]):
+        m = _CONTENT_RE.search(tag)
+        if not m:
+            continue
+        url = urljoin(page_url, html_lib.unescape(m.group(1).strip()))
+        if not url.lower().startswith(('http://', 'https://')):
+            continue
+        path = urlparse(url).path.lower()
+        if path.endswith(UNSUPPORTED_IMAGE_FORMATS) or 'logo' in path:
+            continue
+        return url
+    return None
+
+def fetch_og_image(scraper, page_url, timeout=10):
+    try:
+        response = scraper.get(page_url, timeout=timeout)
+        if response.status_code != 200:
+            return None
+        return find_og_image(response.text, page_url)
+    except Exception as e:
+        logging.warning(f"og:image не отримано для {page_url}: {e}")
+        return None
 
 def is_quality_article(title, description, url):
     unwanted_url_categories = ['/lume/', '/sport/', '/divertisment/', '/lifestyle/', '/magazin/', '/showbiz/', '/horoscop/', '/fun/']
@@ -688,6 +721,25 @@ def process_backlog(stats):
         conn.commit()
     except Exception as db_err:
         logging.error(f"Помилка встановлення статусу processing: {db_err}")
+
+    # --- ФОТО ЗІ СТОРІНКИ СТАТТІ: до перекладу, бо від наявності фото залежить ліміт тексту (900/2500) ---
+    page_scraper = None
+    for item in batch:
+        if item.get('image_urls'):
+            continue
+        page_scraper = page_scraper or cloudscraper.create_scraper(browser={'browser': 'chrome', 'platform': 'windows', 'mobile': False})
+        og_image = fetch_og_image(page_scraper, item['url'])
+        if not og_image:
+            continue
+        item['image_urls'] = [og_image]
+        stats["published"]["og_images_found"] = stats["published"].get("og_images_found", 0) + 1
+        logging.info(f"🖼 Фото зі сторінки статті: {item['url']} -> {og_image}")
+        try:
+            cursor.execute("UPDATE articles SET image_urls = %s WHERE guid = %s", (json.dumps([og_image]), item['guid']))
+            conn.commit()
+        except Exception as db_err:
+            logging.error(f"Помилка збереження og:image: {db_err}")
+            conn.rollback()
           
     prompt = f"Ось список із {len(batch)} новин. Ти — досвідчений головний редактор Telegram-каналу для українців, які живуть у Молдові (діаспора, біженці). Твоє завдання — перекласти та адаптувати ці новини українською мовою.\n\n"
     prompt += """СУВОРІ ПРАВИЛА ПЕРЕКЛАДУ ТА ФОРМАТУВАННЯ:
