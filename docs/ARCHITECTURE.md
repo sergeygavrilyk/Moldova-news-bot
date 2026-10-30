@@ -141,7 +141,7 @@ pending ──▶ processing ──▶ sent
 
 ## 6. CI: `.github/workflows/news_bot_run.yml`
 
-- Тригер: лише `workflow_dispatch` (ручний запуск або API-виклик від cron-job.org).
+- Тригер: лише `workflow_dispatch` (ручний запуск або API-виклик від cron-job.org). Вхід `dry_run` (галочка «Тестовий запуск», за замовчуванням вимкнена; cron-job.org її не передає) → `DRY_RUN=true`: БД лише на читання, `setup_db.py` пропускається, пости — в адмін-чат з позначкою ТЕСТ.
 - `ubuntu-latest`, Python 3.11, кеш pip.
 - Кроки: `pip install -r requirements.txt` → `python setup_db.py` → `python main.py`.
 - Секрети: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHANNEL_ID`, `GEMINI_API_KEY`, `ADMIN_CHAT_ID`, `DATABASE_URL`.
