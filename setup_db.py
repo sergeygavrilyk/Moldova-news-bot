@@ -58,6 +58,20 @@ def setup_database():
         cursor.execute("ALTER TABLE articles ADD COLUMN IF NOT EXISTS published_at TIMESTAMP")
 
         cursor.execute("""
+        CREATE TABLE IF NOT EXISTS model_calls (
+            id SERIAL PRIMARY KEY,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            task VARCHAR(20),
+            model VARCHAR(64),
+            outcome VARCHAR(20),
+            http_code INTEGER,
+            latency_ms INTEGER,
+            error TEXT
+        )
+        """)
+        cursor.execute("ALTER TABLE model_calls ENABLE ROW LEVEL SECURITY")
+
+        cursor.execute("""
         CREATE TABLE IF NOT EXISTS run_analytics (
             id SERIAL PRIMARY KEY,
             timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,

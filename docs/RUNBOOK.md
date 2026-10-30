@@ -77,6 +77,33 @@ WHERE a.status = 'sent' AND a.created_at > NOW() - INTERVAL '7 days'
 GROUP BY 1 ORDER BY 2 DESC;
 ```
 
+### 4.1 Статистика моделей Gemini (таблиця `model_calls`, з 30.10.2026)
+Кожна спроба виклику моделі (фільтр / переклад) — окремий рядок: `ok`, `unavailable` (503, перевантаження), `quota` (429), `timeout`, `bad_response`, `error`. Тестові запуски сюди не пишуть.
+
+```sql
+-- Надійність моделей за 7 днів
+SELECT task, model, COUNT(*) AS calls,
+       ROUND(100.0 * COUNT(*) FILTER (WHERE outcome = 'ok') / COUNT(*)) AS ok_pct,
+       COUNT(*) FILTER (WHERE outcome = 'unavailable') AS unavailable,
+       COUNT(*) FILTER (WHERE outcome = 'quota')       AS quota,
+       COUNT(*) FILTER (WHERE outcome = 'timeout')     AS timeout,
+       ROUND(AVG(latency_ms) FILTER (WHERE outcome = 'ok') / 1000.0, 1) AS avg_ok_sec
+FROM model_calls WHERE created_at > NOW() - INTERVAL '7 days'
+GROUP BY task, model ORDER BY task, calls DESC;
+
+-- Коли модель найчастіше недоступна (година UTC)
+SELECT model, EXTRACT(HOUR FROM created_at)::int AS hour_utc,
+       COUNT(*) FILTER (WHERE outcome <> 'ok') AS failures, COUNT(*) AS calls
+FROM model_calls WHERE created_at > NOW() - INTERVAL '7 days'
+GROUP BY 1, 2 HAVING COUNT(*) FILTER (WHERE outcome <> 'ok') > 0 ORDER BY 1, 2;
+
+-- Хто реально перекладав пости (перша успішна модель у кожному запуску)
+SELECT model, COUNT(*) FROM model_calls
+WHERE task = 'translate' AND outcome = 'ok' AND created_at > NOW() - INTERVAL '7 days'
+GROUP BY 1 ORDER BY 2 DESC;
+```
+У звіті адміну після кожного запуску — рядок `🧾 Спроби: 3.8-flash 503 | 3.6-flash ✅`.
+
 ## 5. Типові операції
 
 ### 5.1 Додати RSS-джерело

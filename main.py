@@ -91,6 +91,43 @@ class GeminiQuotaExhausted(Exception):
 def is_quota_error(error):
     return getattr(error, 'code', None) == 429 or 'RESOURCE_EXHAUSTED' in str(error)
 
+# Статистика викликів моделей (T-22): кожна спроба -> рядок у таблиці model_calls наприкінці запуску
+MODEL_CALLS = []
+
+def classify_model_error(error):
+    """Тип збою моделі для статистики: quota | unavailable | timeout | bad_response | error."""
+    code = getattr(error, 'code', None)
+    text = str(error)
+    if code == 429 or 'RESOURCE_EXHAUSTED' in text:
+        return 'quota', code or 429
+    if code in (500, 502, 503, 504) or 'UNAVAILABLE' in text or 'overloaded' in text.lower() or 'high demand' in text.lower():
+        return 'unavailable', code or 503
+    if 'timeout' in type(error).__name__.lower() or 'timed out' in text.lower() or 'timeout' in text.lower():
+        return 'timeout', None
+    if isinstance(error, ValueError):  # порожня відповідь, неправильна кількість текстів тощо
+        return 'bad_response', None
+    return 'error', code if isinstance(code, int) else None
+
+def record_model_call(task, model, outcome, started, http_code=None, error=None):
+    MODEL_CALLS.append({
+        'task': task, 'model': model, 'outcome': outcome, 'http_code': http_code,
+        'latency_ms': int((time.time() - started) * 1000),
+        'error': _mask_token(error)[:300] if error is not None else None,
+    })
+
+def model_calls_summary():
+    """Коротко для звіту адміну: «3.8-flash ✅ | 3.6-flash 503×2»."""
+    marks = {'ok': '✅', 'quota': '⛽', 'unavailable': '503', 'timeout': '⏱', 'bad_response': '⚠️', 'error': '❌'}
+    counts = {}
+    for c in MODEL_CALLS:
+        key = (c['task'], c['model'].replace('gemini-', ''), c['outcome'])
+        counts[key] = counts.get(key, 0) + 1
+    parts = []
+    for (task, model, outcome), n in counts.items():
+        mark = marks.get(outcome, outcome)
+        parts.append(f"{model} {mark}" + (f"×{n}" if n > 1 else ""))
+    return ' | '.join(parts)
+
 def run_model_cascade(task, models, call):
     """Пробує моделі по черзі. Квота вичерпана (429) -> модель пропускається до кінця запуску
     і одразу береться наступна; інша помилка -> пауза 5 с і наступна модель."""
@@ -100,13 +137,17 @@ def run_model_cascade(task, models, call):
 
     last_error = None
     for model in available:
+        started = time.time()
         try:
             result = call(model)
+            record_model_call(task, model, 'ok', started)
             MODEL_USAGE[task] = model
             logging.info(f"🤖 {task}: відповіла модель {model}")
             return result
         except Exception as e:
             last_error = e
+            outcome, http_code = classify_model_error(e)
+            record_model_call(task, model, outcome, started, http_code, e)
             MODEL_USAGE["failed_attempts"] += 1
             if is_quota_error(e):
                 EXHAUSTED_MODELS.add(model)
@@ -193,6 +234,7 @@ def send_analytics_to_admin(stats):
             f"📊 <b>Розширений звіт бота (Молдова)</b>\n\n"
             f"⏱ Час: {stats['execution_time']} сек | ⚠️ Помилок: {stats['errors_count']} | 🔄 Невдалих спроб моделей: {stats['gemini_retries']}\n"
             f"🤖 Моделі: {models_str}{exhausted_str}\n"
+            f"{('🧾 Спроби: ' + model_calls_summary() + chr(10)) if MODEL_CALLS else ''}"
             f"🪙 <b>Токени (сьогодні/тиждень/місяць):</b>\n   {tokens_day:,} / {tokens_week:,} / {tokens_month:,}\n\n"
             f"🔍 <b>Воронка фільтрації:</b>\n▪️ Знайдено в RSS: {stats['funnel']['scraped_total']}\n▪️ По джерелах: {scraped_src_str}\n"
             f"▪️ Пропущено (старі/вже в історії): {stats['funnel']['already_seen']}\n▪️ Відсіяно фільтрами: {stats['funnel']['rejected_by_keywords']}\n"
@@ -1254,6 +1296,23 @@ def main():
             conn.close()
         except Exception as e:
             logging.error(f"Помилка збереження аналітики в БД: {e}")
+
+        # T-22: статистика викликів моделей — окремо, щоб її збій не зачепив основну аналітику
+        if MODEL_CALLS:
+            try:
+                conn = get_db_connection()
+                cursor = conn.cursor()
+                for c in MODEL_CALLS:
+                    cursor.execute(
+                        "INSERT INTO model_calls (task, model, outcome, http_code, latency_ms, error) VALUES (%s, %s, %s, %s, %s, %s)",
+                        (c['task'], c['model'], c['outcome'], c['http_code'], c['latency_ms'], c['error'])
+                    )
+                cursor.execute("DELETE FROM model_calls WHERE created_at <= NOW() - INTERVAL '90 days'")
+                conn.commit()
+                cursor.close()
+                conn.close()
+            except Exception as e:
+                logging.error(f"Помилка збереження статистики моделей: {e}")
             
         send_analytics_to_admin(stats)
 
