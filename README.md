@@ -42,16 +42,14 @@ cron-job.org ──(HTTP POST, ~щогодини вдень)──▶ GitHub Act
 | Файл / папка | Призначення |
 |---|---|
 | `main.py` | Основний скрипт: збір RSS → фільтри → Gemini → Telegram → аналітика |
-| `setup_db.py` | Створює таблиці (якщо їх нема) і заносить джерела з `feeds.json`. Запускається перед кожним `main.py` у CI. ⚠️ Схема в ньому застаріла — див. [db/schema.sql](db/schema.sql) |
+| `setup_db.py` | Створює таблиці (якщо їх нема) і заносить джерела з `feeds.json`. Запускається перед кожним `main.py` у CI. Схема збігається з [db/schema.sql](db/schema.sql) |
 | `feeds.json` | Початковий список RSS-джерел (читається лише `setup_db.py`; робочий список — таблиця `sources`) |
 | `requirements.txt` | Python-залежності |
 | `.github/workflows/news_bot_run.yml` | GitHub Actions workflow (тригер `workflow_dispatch`) |
 | `.env` | Секрети для локального запуску. **Не комітиться** (є в `.gitignore`). Шаблон — `.env.example` |
 | `tools/check_feeds.py` | Оцінка RSS-джерел правилами бота (workflow «Check RSS feeds»), список кандидатів — `tools/feed_candidates.json` |
 | `check_models.py` | Утиліта: показує, які моделі Gemini доступні для вашого ключа |
-| `test_rss.py` | Утиліта: перевіряє, що RSS-посилання відповідають (список джерел продубльовано всередині файлу) |
-| `analytics.json` | **Застарілий** файл аналітики з часів до Supabase (до 17.09.2026). Зараз аналітика — у таблиці `run_analytics` |
-| `__pycache__/` | Кеш Python, випадково потрапив у git |
+| `test_rss.py` | Утиліта: швидко перевіряє, що RSS-посилання з `feeds.json` відповідають |
 | `db/schema.sql` | Фактична схема БД у Supabase (знята 30.10.2026) |
 | `docs/` | Документація: архітектура, інструкція з експлуатації, аудит |
 | `project_state.md` | Живий журнал проєкту: стан, задачі, тех. борг, ідеї, рішення, історія змін |

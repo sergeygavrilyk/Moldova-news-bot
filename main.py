@@ -9,11 +9,12 @@ import json
 import re
 import html as html_lib
 import random
+import sys
 import psycopg2
 from urllib.parse import urlparse, urljoin
 from dotenv import load_dotenv
 from google import genai
-from google.genai import types  # ДОДАНО ДЛЯ SAFETY SETTINGS
+from google.genai import types
 import cloudscraper
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_not_exception_type, retry_if_exception_type
 from typing import Literal
@@ -203,9 +204,9 @@ class _ReadOnlyConnection:
         self._conn.rollback()
         self._conn.close()
 
-def get_db_connection():
+def get_db_connection(read_only=False):
     conn = psycopg2.connect(DATABASE_URL)
-    return _ReadOnlyConnection(conn) if DRY_RUN else conn
+    return _ReadOnlyConnection(conn) if (DRY_RUN or read_only) else conn
 
 def send_analytics_to_admin(stats):
     if not ADMIN_CHAT_ID: return
@@ -228,12 +229,13 @@ def send_analytics_to_admin(stats):
         pub_src_str = ", ".join([f"{k}: {v}" for k, v in stats['published']['sources'].items()]) if stats['published']['sources'] else "Немає"
         models_str = f"фільтр — {MODEL_USAGE['filter'] or '—'} | переклад — {MODEL_USAGE['translate'] or '—'}"
         exhausted_str = f"\n⛽ Квоту вичерпано: {', '.join(sorted(EXHAUSTED_MODELS))}" if EXHAUSTED_MODELS else ""
+        failed_src_str = f"\n🔴 Недоступні джерела: {', '.join(stats['failed_sources'])}" if stats.get('failed_sources') else ""
 
         message = (
             f"{'🧪 <b>ТЕСТОВИЙ ЗАПУСК (DRY_RUN)</b> — нічого не опубліковано й не записано в БД' + chr(10) + chr(10) if DRY_RUN else ''}"
             f"📊 <b>Розширений звіт бота (Молдова)</b>\n\n"
             f"⏱ Час: {stats['execution_time']} сек | ⚠️ Помилок: {stats['errors_count']} | 🔄 Невдалих спроб моделей: {stats['gemini_retries']}\n"
-            f"🤖 Моделі: {models_str}{exhausted_str}\n"
+            f"🤖 Моделі: {models_str}{exhausted_str}{failed_src_str}\n"
             f"{('🧾 Спроби: ' + model_calls_summary() + chr(10)) if MODEL_CALLS else ''}"
             f"🪙 <b>Токени (сьогодні/тиждень/місяць):</b>\n   {tokens_day:,} / {tokens_week:,} / {tokens_month:,}\n\n"
             f"🔍 <b>Воронка фільтрації:</b>\n▪️ Знайдено в RSS: {stats['funnel']['scraped_total']}\n▪️ По джерелах: {scraped_src_str}\n"
@@ -251,11 +253,23 @@ def send_analytics_to_admin(stats):
     except Exception as e:
         logging.error(f"Помилка відправки статистики в Telegram: {e}")
 
+# D-01: після SOURCE_ERROR_LIMIT помилок поспіль джерело переходить у 'error' і опитується
+# лише раз на SOURCE_RETRY_HOURS год; щойно стрічка запрацює — автоматично повертається в 'ok'.
+# Статус 'disabled' (вимкнено вручну) бот не чіпає.
+SOURCE_ERROR_LIMIT = 3
+SOURCE_RETRY_HOURS = 6
+
 def get_active_sources():
+    """Джерела для опитування: усі 'ok' + 'error', з останньої спроби яких минуло SOURCE_RETRY_HOURS год."""
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT id, name, url FROM sources WHERE status = 'ok'")
+        cursor.execute(
+            "SELECT id, name, url, status FROM sources WHERE status = 'ok' "
+            "OR (status = 'error' AND (last_checked IS NULL OR last_checked < NOW() - make_interval(hours => %s))) "
+            "ORDER BY id",
+            (SOURCE_RETRY_HOURS,)
+        )
         sources = cursor.fetchall()
         cursor.close()
         conn.close()
@@ -263,6 +277,20 @@ def get_active_sources():
     except Exception as e:
         logging.error(f"Помилка читання PostgreSQL: {e}")
         return []
+
+def notify_source_status(source_name, became_ok, error_text=None, error_count=None):
+    """D-01: сповіщення адміну, коли джерело вимикається через помилки або знову запрацювало.
+    У тестовому запуску статуси в БД не змінюються, тож і сповіщень немає."""
+    esc = lambda v: html_lib.escape(str(v or ''), quote=False)
+    if became_ok:
+        msg = f"✅ <b>Джерело знову працює:</b> {esc(source_name)}\nПовернуто в роботу автоматично."
+    else:
+        msg = (f"🔴 <b>Джерело вимкнено:</b> {esc(source_name)}\n"
+               f"{error_count} помилок поспіль. Остання: <code>{esc(_short(_mask_token(error_text), 300))}</code>\n"
+               f"Бот пробуватиме його раз на {SOURCE_RETRY_HOURS} год і сам поверне, коли стрічка запрацює.")
+    logging.warning(html_to_plain(msg))
+    if not DRY_RUN:
+        send_admin_html(msg)
 
 def clean_description(raw, max_len=1500):
     """Опис з RSS без HTML-розмітки й зайвих пробілів (D-15): менше токенів, чистіші ембединги."""
@@ -560,7 +588,7 @@ def deduplicate_news(client, articles, recent_history=None, stats=None):
     
     history = recent_history[-75:] if recent_history else []
     prompt_data = [{"id": i, "title": a["title"], "description": a.get("description", "")} for i, a in enumerate(articles)]
-# ДОДАНО ЛОГУВАННЯ ЗАГОЛОВКІВ ("Прожектор")
+    # Список кандидатів у лог — щоб бачити, що саме отримав фільтр
     titles_log = "\n".join([f"[{i}] {a['title']}" for i, a in enumerate(articles)])
     logging.info(f"📋 Кандидати на фільтрацію (Молдова):\n{titles_log}")
     
@@ -668,13 +696,17 @@ def deduplicate_news(client, articles, recent_history=None, stats=None):
             stats["errors_count"] += 1
         return None, {}
 
+# Ключові слова «українських» новин (румунською й російською) — для пріоритету в черзі та статистики
+UKRAINE_KEYWORDS = [r'\bucrain', r'\bzelenski', r'\bkiev', r'\bkiiv', r'\bodesa', r'\bodessa', r'\brefugiat', r'\bprotectie temporara', r'\bprotecție temporară', r'\bprivremen\w*\s+protectie', r'\bукраин', r'\bзеленск', r'\bкиев', r'\bодесс', r'\bбеженц']
+
+def is_ukraine_related(item):
+    text = (item.get('title', '') + " " + item.get('description', '')).lower()
+    return any(re.search(kw, text) for kw in UKRAINE_KEYWORDS)
+
 def prioritize_ukraine_news(backlog_items):
-    ukraine_keywords = [r'\bucrain', r'\bzelenski', r'\bkiev', r'\bkiiv', r'\bodesa', r'\bodessa', r'\brefugiat', r'\bprotectie temporara', r'\bprotecție temporară', r'\bprivremen\w*\s+protectie', r'\bукраин', r'\bзеленск', r'\bкиев', r'\bодесс', r'\bбеженц']
-    ukraine_news = []
-    other_news = []
-    for item in backlog_items:
-        if any(re.search(kw, (item.get('title', '') + " " + item.get('description', '')).lower()) for kw in ukraine_keywords): ukraine_news.append(item)
-        else: other_news.append(item)
+    """Українські новини — на початок черги, порядок усередині груп зберігається."""
+    ukraine_news = [item for item in backlog_items if is_ukraine_related(item)]
+    other_news = [item for item in backlog_items if not is_ukraine_related(item)]
     return ukraine_news + other_news
 
 def scrape_feeds(stats):
@@ -687,7 +719,7 @@ def scrape_feeds(stats):
         conn.close()
         return
           
-    now = datetime.datetime.now()
+    now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)  # час у БД — UTC
     current_time = time.time()
 
     # ОПТИМІЗАЦІЯ: кешуємо в пам'ять лише недавні URL та заголовки (за останні 3 дні), 
@@ -698,7 +730,7 @@ def scrape_feeds(stats):
     cursor.execute("SELECT title FROM articles WHERE created_at >= NOW() - INTERVAL '3 days'")
     db_titles = {row[0] for row in cursor.fetchall()}
 
-    for source_id, source_name, feed_url in active_sources:
+    for source_id, source_name, feed_url, source_status in active_sources:
         if "scraped_by_source" not in stats["funnel"]: stats["funnel"]["scraped_by_source"] = {}
         source_count = 0    
         try:   
@@ -711,13 +743,27 @@ def scrape_feeds(stats):
                 raise Exception("Порожня стрічка: 0 записів (можливо, сайт віддав сторінку замість RSS)")
             cursor.execute("UPDATE sources SET status = 'ok', error_count = 0, last_error_log = NULL, last_checked = %s WHERE id = %s", (now, source_id))
             conn.commit()
+            if source_status == 'error':
+                notify_source_status(source_name, became_ok=True)
         except Exception as e:
             conn.rollback()  # на випадок, якщо впав сам UPDATE — інакше наступні запити не виконаються
-            cursor.execute("UPDATE sources SET error_count = error_count + 1, last_error_log = %s, last_checked = %s WHERE id = %s", (str(e), now, source_id))
-            cursor.execute("SELECT error_count FROM sources WHERE id = %s", (source_id,))
-            if cursor.fetchone()[0] >= 3: cursor.execute("UPDATE sources SET status = 'error' WHERE id = %s", (source_id,))
-            conn.commit()
-            continue   
+            logging.warning(f"⚠️ Джерело {source_name} недоступне: {e}")
+            stats.setdefault("failed_sources", []).append(source_name)
+            try:
+                cursor.execute("UPDATE sources SET error_count = error_count + 1, last_error_log = %s, last_checked = %s WHERE id = %s", (str(e)[:1000], now, source_id))
+                cursor.execute("SELECT error_count FROM sources WHERE id = %s", (source_id,))
+                row = cursor.fetchone()
+                error_count = row[0] if row else 0
+                if source_status == 'ok' and error_count >= SOURCE_ERROR_LIMIT:
+                    cursor.execute("UPDATE sources SET status = 'error' WHERE id = %s", (source_id,))
+                    conn.commit()
+                    notify_source_status(source_name, became_ok=False, error_text=e, error_count=error_count)
+                else:
+                    conn.commit()
+            except Exception as db_err:
+                logging.error(f"Помилка оновлення статусу джерела {source_name}: {db_err}")
+                conn.rollback()
+            continue
               
         for entry in feed.entries[:15]:   
             stats["funnel"]["scraped_total"] += 1
@@ -745,24 +791,24 @@ def scrape_feeds(stats):
                 stats["funnel"]["rejected_by_keywords"] += 1
                 continue
 
-            # --- 1. ГЕНЕРАЦИЯ ВЕКТОРА (EMBEDDING) ---
+            # --- 1. ВЕКТОР (EMBEDDING) ДЛЯ СЕМАНТИЧНОГО ПОШУКУ ДУБЛІВ ---
             try:
                 embed_response = client.models.embed_content(
                     model="gemini-embedding-001",
                     contents=f"{title}. {description}"
                 )
                 vector = embed_response.embeddings[0].values
-                # Форматируем список в строку вектора для PostgreSQL: "[0.1, 0.2, ...]"
+                # Вектор як рядок для PostgreSQL: "[0.1, 0.2, ...]"
                 vector_str = f"[{','.join(map(str, vector))}]"
             except Exception as e:
-                logging.error(f"Ошибка генерации вектора для {url}: {e}")
+                logging.error(f"Помилка генерації вектора для {url}: {e}")
                 vector_str = None
 
-            # --- 2. ПРОВЕРКА НА СЕМАНТИЧЕСКИЙ ДУБЛИКАТ В БД (> 90%) ---
+            # --- 2. ПЕРЕВІРКА НА СМИСЛОВИЙ ДУБЛЬ У БД (схожість > 90%) ---
             is_semantic_duplicate = False
             if vector_str:
                 try:
-                    # Ищем косинусное сходство (1 - distance). 
+                    # Косинусна схожість = 1 - відстань
                     cursor.execute("""
                         SELECT title, 1 - (embedding <=> %s::vector) AS similarity 
                         FROM articles 
@@ -773,18 +819,18 @@ def scrape_feeds(stats):
                     """, (vector_str, vector_str))
                     
                     match = cursor.fetchone()
-                    if match and match[1] > 0.90:  # Порог 90% сходства
-                        logging.info(f"🛑 Векторный фильтр отсек дубликат (Сходство {match[1]:.2f}): {title[:40]}... -> Похоже на: {match[0][:40]}...")
+                    if match and match[1] > 0.90:  # поріг схожості 90%
+                        logging.info(f"🛑 Векторний фільтр відсіяв дубль (схожість {match[1]:.2f}): {title[:40]}... -> схоже на: {match[0][:40]}...")
                         is_semantic_duplicate = True
                 except Exception as e:
-                    logging.error(f"Ошибка векторного поиска: {e}")
-                    conn.rollback() # Сброс транзакции при ошибке, чтобы скрипт не упал
+                    logging.error(f"Помилка векторного пошуку: {e}")
+                    conn.rollback()  # скидаємо транзакцію, інакше наступні запити не виконаються
 
             if is_semantic_duplicate:
                 stats["funnel"]["already_seen"] += 1
                 continue
 
-            # --- 3. ЗАПИСЬ НОВОЙ СТАТЬИ И ЕЕ ВЕКТОРА ---
+            # --- 3. ЗАПИС НОВОЇ СТАТТІ ТА ЇЇ ВЕКТОРА ---
             images = extract_image_urls(entry)
             try:
                 cursor.execute('''
@@ -796,7 +842,7 @@ def scrape_feeds(stats):
                 # більше не скасовує все, що вже зібрано в цьому запуску (AUDIT A3 / T-05)
                 conn.commit()
             except Exception as e:
-                logging.error(f"Ошибка записи в БД: {e}")
+                logging.error(f"Помилка запису в БД: {e}")
                 conn.rollback()
 
             if DRY_RUN:  # у БД нічого не записано — передаємо статтю у відбір напряму
@@ -818,7 +864,7 @@ def process_backlog(stats):
     conn = get_db_connection()
     cursor = conn.cursor()
     
-    # --- ДОДАНО: Відновлення завислих у статусі 'processing' ---
+    # --- Відновлення статей, що зависли в статусі 'processing' ---
     try:
         cursor.execute("""
             UPDATE articles 
@@ -831,7 +877,7 @@ def process_backlog(stats):
         logging.error(f"Помилка відновлення завислих processing: {db_err}")
     # ----------------------------------------------------------
 
-    # --- ДОДАНО: Автоматичне очищення старого беклогу ---
+    # --- Автоматичне очищення старого беклогу ---
     try:
         # D-14: вік рахуємо від публікації на сайті (якщо відома), а не від моменту збору
         cursor.execute(
@@ -851,7 +897,6 @@ def process_backlog(stats):
         WHERE a.status = 'pending' ORDER BY COALESCE(a.published_at, a.created_at) DESC
     """)
     rows = cursor.fetchall()
-    # ... далі код залишається без змін ...
     backlog = []
     for r in rows:
         backlog.append({
@@ -874,7 +919,6 @@ def process_backlog(stats):
         conn.close()
         return
 
-    ukraine_keywords = [r'\bucrain', r'\bzelenski', r'\bkiev', r'\bkiiv', r'\bodesa', r'\bodessa', r'\brefugiat', r'\bprotectie temporara', r'\bprotecție temporară', r'\bprivremen\w*\s+protectie', r'\bукраин', r'\bзеленск', r'\bкиев', r'\bодесс', r'\bбеженц']
     backlog.sort(key=lambda x: x.get('timestamp', 0), reverse=True)
       
     all_sources = list(dict.fromkeys(item['source'] for item in backlog))
@@ -894,8 +938,7 @@ def process_backlog(stats):
     # перевіряємо їх і робимо ранній вихід (break), коли вони закінчуються.
     sorted_backlog = prioritize_ukraine_news(backlog)
     for item in sorted_backlog:
-        text_context = (item.get('title', '') + " " + item.get('description', '')).lower()
-        if any(re.search(kw, text_context) for kw in ukraine_keywords):
+        if is_ukraine_related(item):
             if item['url'] not in used_urls:
                 candidate_batch.append(item)
                 used_urls.add(item['url'])
@@ -941,12 +984,8 @@ def process_backlog(stats):
 
     if DRY_RUN:
         send_dry_run_filter_report(list(evaluated_guids.values()), approved_guids, reasons_map, candidate_batch)
-    
-    for idx, item in enumerate(candidate_batch):
-        # Якщо стаття не увійшла в approved, вона відхилена
-        pass
-        
-    # Проходимо по всіх кандидатах і оновлюємо статус в БД
+
+    # Кандидати, яких немає серед схвалених, — відхилені: статус rejected і причина в БД
     try:
         for idx, item in enumerate(evaluated_guids.values()):
             guid = item['guid']
@@ -969,7 +1008,6 @@ def process_backlog(stats):
         conn.close()
         return
       
-    # ДОДАЙТЕ ЦІ ДВА РЯДКИ:
     used_sources_log = list(dict.fromkeys(item.get('source') for item in batch))
     logging.info(f"🔄 Обрано {len(batch)} новин. Фактичні джерела: {', '.join(used_sources_log)}")
       
@@ -1050,7 +1088,7 @@ def process_backlog(stats):
         logging.error(f"❌ Помилка Gemini під час перекладу: {e}")
         stats["errors_count"] += 1 
         
-        # --- ДОДАНО: Повертаємо завислі статті назад у чергу ---
+        # --- Повертаємо статті партії назад у чергу ---
         try:
             cursor.execute("UPDATE articles SET status = 'pending' WHERE guid = ANY(%s)", (batch_guids,))
             conn.commit()
@@ -1066,16 +1104,14 @@ def process_backlog(stats):
     for idx, item in enumerate(batch):
         if idx >= len(generated_texts): break 
         
-        # Видалили виклик функції, передаємо порожні tags
         images = item.get('image_urls', [])
-          
         post_text = apply_update_prefix(generated_texts[idx], item.get('is_update', False))
-        if send_to_telegram(post_text, item['url'], item.get('source', 'Джерело'), images, tags=""):
+        if send_to_telegram(post_text, item['url'], item.get('source', 'Джерело'), images):
             try:
                 cursor.execute("UPDATE articles SET status = 'sent' WHERE guid = %s", (item['guid'],))
                 conn.commit()
                 stats["published"]["total"] += 1
-                if any(re.search(kw, (item.get('title', '') + " " + item.get('description', '')).lower()) for kw in ukraine_keywords): 
+                if is_ukraine_related(item):
                     stats["published"]["ukraine_priority"] += 1
                 if images: stats["published"]["with_images"] += 1
                 else: stats["published"]["text_only"] += 1
@@ -1167,15 +1203,13 @@ def visible_len(html_text):
     """Довжина тексту так, як її рахує Telegram (без HTML-тегів, сутності — один символ)."""
     return len(html_lib.unescape(re.sub(r'<[^>]+>', '', html_text or '')))
 
-def send_to_telegram(text, url, source_name, image_urls=None, tags=""):
-   
-    
-    # 2. ХЕШТЕГИ В КІНЦІ ТЕКСТУ (D-22): беремо лише самі хештеги, а не весь останній абзац —
+def send_to_telegram(text, url, source_name, image_urls=None):
+    # 1. ХЕШТЕГИ В КІНЦІ ТЕКСТУ (D-22): беремо лише самі хештеги, а не весь останній абзац —
     # модель інколи ставить їх з нового рядка без порожнього рядка, і тоді «абзацом» ставав увесь текст
     text, hashtags = split_trailing_hashtags(text)
     extracted_tags = f"\n\n{hashtags}" if hashtags else ""
 
-    # Обробка списку зображень (з Молдовського)
+    # Список зображень: None/рядок -> список
     if not image_urls: image_urls = []
     elif isinstance(image_urls, str): image_urls = [image_urls]
     
@@ -1188,10 +1222,10 @@ def send_to_telegram(text, url, source_name, image_urls=None, tags=""):
     # D-19: URL і назва джерела — з екрануванням
     safe_url = html_lib.escape(url or '', quote=True)
     safe_source = html_lib.escape(source_name or 'Джерело', quote=False)
-    footer = f"{extracted_tags}{tags}\n\n🔗 Джерело: <a href=\"{safe_url}\">{safe_source}</a>"
+    footer = f"{extracted_tags}\n\n🔗 Джерело: <a href=\"{safe_url}\">{safe_source}</a>"
     header = DRY_RUN_HEADER if DRY_RUN else ""
 
-    # 3. ЛІМІТ ТЕКСТУ (D-22): Telegram рахує видимі символи — підпис до фото ≤ 1024, повідомлення ≤ 4096.
+    # 2. ЛІМІТ ТЕКСТУ (D-22): Telegram рахує видимі символи — підпис до фото ≤ 1024, повідомлення ≤ 4096.
     # Бюджет тексту = ліміт (із запасом) − шапка − хештеги − «Джерело»; не менше 300 символів.
     total_limit = 1000 if image_urls else 4000
     budget = max(total_limit - visible_len(header) - visible_len(footer), 300)
@@ -1207,7 +1241,7 @@ def send_to_telegram(text, url, source_name, image_urls=None, tags=""):
 
     payload = {'chat_id': target_chat_id()}
     
-    # Структура відправки (з Молдовського)
+    # 3. ФОРМАТ: текст | одне фото з підписом | альбом (підпис — до першого фото)
     if len(image_urls) == 0:
         payload['parse_mode'] = 'HTML'
         payload['text'] = full_message
@@ -1246,7 +1280,180 @@ def send_to_telegram(text, url, source_name, image_urls=None, tags=""):
             logging.error(f"❌ Критична помилка Telegram API: {e}")
             return False
 
+# ================= ТИЖНЕВИЙ ЗВІТ АДМІНУ (I-06) =================
+# Надсилається з першого запуску понеділка (UTC) — окремий розклад не потрібен.
+# Вручну: GitHub Actions -> «Run Moldova News Bot» -> «weekly_report» (лише звіт, без новин),
+# або локально: python main.py --weekly-report. Звіт лише читає БД.
+WEEKLY_REPORT_DAYS = 7
+OUTCOME_MARKS = {'unavailable': '503', 'quota': '⛽', 'timeout': '⏱', 'bad_response': '⚠️', 'error': '❌'}
+
+def weekly_report_due():
+    """Перший запуск понеділка (UTC): сьогодні понеділок і в run_analytics ще немає записів за сьогодні."""
+    if DRY_RUN:
+        return False
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT EXTRACT(ISODOW FROM NOW() AT TIME ZONE 'UTC')::int,
+                   (SELECT COUNT(*) FROM run_analytics WHERE timestamp >= date_trunc('day', NOW() AT TIME ZONE 'UTC'))
+        """)
+        weekday, runs_today = cursor.fetchone()
+        cursor.close()
+        conn.close()
+        return weekday == 1 and runs_today == 0
+    except Exception as e:
+        logging.error(f"Не вдалося перевірити, чи час тижневого звіту: {e}")
+        return False
+
+def _pct(part, whole):
+    return f"{round(100 * part / whole)}%" if whole else "—"
+
+def build_weekly_report(cursor, days=WEEKLY_REPORT_DAYS, on_demand=False):
+    """Тижневий звіт (HTML) за останні `days` днів: запуски, пости по джерелах, причини відхилень,
+    моделі Gemini, вичерпані квоти, стан джерел. Лише SELECT."""
+    esc = lambda v: html_lib.escape(str(v if v is not None else ''), quote=False)
+    since = f"NOW() - make_interval(days => {int(days)})"
+
+    cursor.execute(f"""
+        SELECT COUNT(*), COALESCE(SUM(errors_count), 0), COUNT(*) FILTER (WHERE errors_count > 0),
+               COALESCE(SUM(tokens_used), 0), COALESCE(AVG(execution_time), 0)
+        FROM run_analytics WHERE timestamp >= {since}
+    """)
+    runs, errors, runs_with_errors, tokens, avg_time = cursor.fetchone()
+
+    cursor.execute(f"""
+        SELECT s.name, a.status, COUNT(*),
+               COUNT(*) FILTER (WHERE jsonb_typeof(a.image_urls) = 'array' AND jsonb_array_length(a.image_urls) > 0)
+        FROM articles a JOIN sources s ON s.id = a.source_id
+        WHERE a.created_at >= {since}
+        GROUP BY s.name, a.status
+    """)
+    by_source, by_status = {}, {}
+    for name, status, n, photos in cursor.fetchall():
+        src = by_source.setdefault(name, {})
+        src[status] = src.get(status, 0) + n
+        if status == 'sent':
+            src['photos'] = src.get('photos', 0) + photos
+        by_status[status] = by_status.get(status, 0) + n
+
+    cursor.execute(f"""
+        SELECT rejection_reason, COUNT(*) FROM articles
+        WHERE status = 'rejected' AND created_at >= {since} GROUP BY rejection_reason
+    """)
+    reasons = {}
+    for raw, n in cursor.fetchall():
+        reason = NO_REASON if raw in (None, '', NO_REASON) else normalize_reason(raw)  # старі причини — до D-04
+        reasons[reason] = reasons.get(reason, 0) + n
+
+    cursor.execute(f"""
+        SELECT task, model, outcome, COUNT(*), COUNT(DISTINCT (created_at)::date)
+        FROM model_calls WHERE created_at >= {since} GROUP BY task, model, outcome
+    """)
+    model_rows = cursor.fetchall()
+    cursor.execute("SELECT MIN(created_at) FROM model_calls")
+    calls_since = cursor.fetchone()[0]
+
+    cursor.execute("SELECT name, status, error_count, last_error_log FROM sources ORDER BY name")
+    sources = cursor.fetchall()
+
+    # ---------- формування тексту ----------
+    today = datetime.datetime.now(datetime.timezone.utc)
+    period = f"{(today - datetime.timedelta(days=days)).strftime('%d.%m')} – {today.strftime('%d.%m.%Y')}"
+    lines = [f"📅 <b>Тижневий звіт бота (Молдова)</b>{' — на вимогу' if on_demand else ''}",
+             f"<i>{period}, час UTC</i>", ""]
+
+    lines.append(f"🚀 Запусків: {runs} | з помилками: {runs_with_errors} (помилок {errors}) | ⏱ у сер. {round(avg_time or 0)} с")
+    lines.append(f"🪙 Токени: {int(tokens):,}")
+    lines.append("")
+
+    sent = by_status.get('sent', 0)
+    photos = sum(v.get('photos', 0) for v in by_source.values())
+    lines.append(f"✅ <b>Опубліковано: {sent}</b> (з фото {_pct(photos, sent)})")
+    for name, v in sorted(by_source.items(), key=lambda kv: (-kv[1].get('sent', 0), kv[0])):
+        extra = []
+        if v.get('rejected'): extra.append(f"відхилено {v['rejected']}")
+        if v.get('failed'): extra.append(f"не надіслано {v['failed']}")
+        sent_n = v.get('sent', 0)
+        photo_part = f" (фото {_pct(v.get('photos', 0), sent_n)})" if sent_n else ""
+        lines.append(f"▪️ {esc(name)} — {sent_n}{photo_part}{', ' + ', '.join(extra) if extra else ''}")
+    total = sum(by_status.values())
+    lines.append(f"📦 Зібрано {total} | відхилено {by_status.get('rejected', 0)} | застаріли {by_status.get('expired', 0)}"
+                 f" | не надіслано {by_status.get('failed', 0)} | у черзі {by_status.get('pending', 0) + by_status.get('processing', 0)}")
+    lines.append("")
+
+    rejected_total = sum(reasons.values())
+    lines.append(f"✖ <b>Причини відхилень ({rejected_total}):</b>")
+    lines.append(" · ".join(f"{esc(r)} {n} ({_pct(n, rejected_total)})" for r, n in sorted(reasons.items(), key=lambda kv: -kv[1])) or "—")
+    lines.append("")
+
+    since_note = ""
+    if calls_since and calls_since > today.replace(tzinfo=None) - datetime.timedelta(days=days):
+        since_note = f" (дані з {calls_since.strftime('%d.%m')})"
+    lines.append(f"🤖 <b>Моделі Gemini</b>{since_note}:")
+    if not model_rows:
+        lines.append("немає даних")
+    stats_by = {}
+    quota = {}
+    for task, model, outcome, n, days_n in model_rows:
+        st = stats_by.setdefault(task, {}).setdefault(model, {})
+        st[outcome] = st.get(outcome, 0) + n
+        if outcome == 'quota':
+            q = quota.setdefault(model, [0, 0])
+            q[0] += n; q[1] = max(q[1], days_n)
+    for task, title in (('filter', 'Фільтр'), ('translate', 'Переклад')):
+        models = stats_by.get(task)
+        if not models:
+            continue
+        ok_total = sum(m.get('ok', 0) for m in models.values())
+        lines.append(f"<b>{title}</b> (успішних {ok_total}):")
+        for model, st in sorted(models.items(), key=lambda kv: -sum(kv[1].values())):
+            tries = sum(st.values())
+            fails = " · ".join(f"{OUTCOME_MARKS.get(o, o)}×{n}" for o, n in sorted(st.items(), key=lambda kv: -kv[1]) if o != 'ok')
+            lines.append(f"▪️ {esc(model.replace('gemini-', ''))} — виконала {_pct(st.get('ok', 0), ok_total)} | "
+                         f"спроб {tries}, вдалих {st.get('ok', 0)} ({_pct(st.get('ok', 0), tries)})"
+                         f"{' | ' + fails if fails else ''}")
+    lines.append("")
+
+    if quota:
+        lines.append("⛽ <b>Вичерпані квоти:</b> " + " · ".join(
+            f"{esc(m.replace('gemini-', ''))} — у {d} з {days} днів (×{n})" for m, (n, d) in sorted(quota.items(), key=lambda kv: -kv[1][0])))
+    elif model_rows:
+        lines.append("⛽ Квоти не вичерпувались")
+    lines.append("")
+
+    working = [n for n, st, _, _ in sources if st == 'ok']
+    lines.append(f"📡 <b>Джерела:</b> працюють {len(working)}")
+    for name, status, error_count, last_error in sources:
+        if status == 'error':
+            lines.append(f"🔴 {esc(name)} — вимкнено через помилки ({error_count}): <code>{esc(_short(last_error, 120))}</code>")
+        elif status == 'ok' and error_count:
+            lines.append(f"🟡 {esc(name)} — помилок поспіль: {error_count}")
+        elif status not in ('ok', 'error'):
+            lines.append(f"⚪️ {esc(name)} — {esc(status)} (вимкнено вручну)")
+    return "\n".join(lines).strip()
+
+def send_weekly_report(on_demand=False):
+    try:
+        conn = get_db_connection(read_only=True)
+        cursor = conn.cursor()
+        report = build_weekly_report(cursor, on_demand=on_demand)
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        logging.error(f"Не вдалося сформувати тижневий звіт: {e}")
+        return False
+    logging.info("📅 Тижневий звіт:\n" + html_to_plain(report))
+    return send_admin_html(report)
+
 def main():
+    # Лише тижневий звіт (ручний запуск): без збору новин, публікацій і записів у БД
+    if '--weekly-report' in sys.argv:
+        if not all([TELEGRAM_BOT_TOKEN, ADMIN_CHAT_ID, DATABASE_URL]):
+            logging.error("Для звіту потрібні TELEGRAM_BOT_TOKEN, ADMIN_CHAT_ID і DATABASE_URL")
+            exit(1)
+        exit(0 if send_weekly_report(on_demand=True) else 1)
+
     # Перевіряємо токени тут, коли скрипт безпосередньо запускається
     if not all([TELEGRAM_BOT_TOKEN, TELEGRAM_CHANNEL_ID, GEMINI_API_KEY, DATABASE_URL]):
         logging.error("Критична помилка: не знайдено базові токени або DATABASE_URL у файлі .env!")
@@ -1257,7 +1464,7 @@ def main():
         logging.warning("🧪 DRY_RUN: тестовий запуск — БД лише на читання, пости йдуть в адмін-чат, а не в канал")
     logging.info(f"🤖 Моделі фільтра: {', '.join(FILTER_MODELS)}")
     logging.info(f"🤖 Моделі перекладу: {', '.join(TRANSLATE_MODELS)}")
-    # ... далі йде словник stats ...
+    weekly_due = weekly_report_due()  # до запису цього запуску в run_analytics
     stats = {
         "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'), 
         "execution_time": 0, 
@@ -1315,6 +1522,8 @@ def main():
                 logging.error(f"Помилка збереження статистики моделей: {e}")
             
         send_analytics_to_admin(stats)
+        if weekly_due:
+            send_weekly_report()
 
 if __name__ == "__main__":
     main()

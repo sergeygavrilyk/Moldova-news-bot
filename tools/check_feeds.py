@@ -45,7 +45,7 @@ def check(feed, scraper):
         if r.status_code not in (200, 301, 302):
             row["verdict"] = f"HTTP {r.status_code}"
             return row
-        parsed = feedparser.parse(r.text)
+        parsed = feedparser.parse(r.content)  # байти: кодування береться з XML-заголовка (як у main.py, D-20)
     except Exception as e:
         row["http"] = "-"
         row["verdict"] = type(e).__name__
