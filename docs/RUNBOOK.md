@@ -106,7 +106,7 @@ UPDATE articles SET status = 'pending' WHERE status IN ('processing', 'failed')
 
 ### 5.5 Змінити модель Gemini
 Без правки коду:
-1. `python check_models.py` — список доступних моделей.
+1. `python check_models.py` показує лише, які моделі **існують** для ключа, а не чи вони працюють і мають безкоштовну квоту. Реальна перевірка — workflow **«Check Gemini models»** (гілка `tools/check-gemini-models`; запускається push-ем у цю гілку): по одному запиту на модель, результат у Job Summary.
 2. GitHub → **Settings → Secrets and variables → Actions → Variables** → `GEMINI_FILTER_MODELS` або `GEMINI_TRANSLATE_MODELS` — назви через кому, в порядку пріоритету. Видалити змінну = повернути значення за замовчуванням з `main.py`.
 3. Наступний звіт адміну покаже в рядку `🤖 Моделі`, яка модель відповіла.
 
