@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import types  # ДОДАНО ДЛЯ SAFETY SETTINGS
 import cloudscraper
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_not_exception_type
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_not_exception_type, retry_if_exception_type
 from pydantic import BaseModel, Field
 
 class RejectedItem(BaseModel):
@@ -162,6 +162,13 @@ def get_active_sources():
     except Exception as e:
         logging.error(f"Помилка читання PostgreSQL: {e}")
         return []
+
+def clean_description(raw, max_len=1500):
+    """Опис з RSS без HTML-розмітки й зайвих пробілів (D-15): менше токенів, чистіші ембединги."""
+    text = re.sub(r'<[^>]+>', ' ', raw or '')
+    text = html_lib.unescape(text)
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text[:max_len]
 
 UNSUPPORTED_IMAGE_FORMATS = ('.webp', '.avif', '.svg')  # Telegram їх не приймає як фото
 
@@ -322,23 +329,111 @@ def generate_news_texts(client, prompt, expected_count):
 
     return run_model_cascade("translate", TRANSLATE_MODELS, call)
 
-@retry(stop=stop_after_attempt(4), wait=wait_exponential(multiplier=2, min=3, max=30), reraise=True)
+# ================= TELEGRAM HTML (D-12, D-19) =================
+# Теги, які розуміє Telegram parse_mode=HTML
+_TG_TAG_RE = re.compile(r'<(/?)(b|strong|i|em|u|ins|s|strike|del|a|code|pre)\b([^<>]*)>', re.I)
+# & що не є дозволеною сутністю (Telegram знає лише &lt; &gt; &amp; &quot; і числові)
+_TG_BAD_AMP_RE = re.compile(r'&(?!(?:lt|gt|amp|quot|#\d+|#x[0-9a-fA-F]+);)')
+
+def sanitize_telegram_html(text):
+    """Робить текст безпечним для parse_mode=HTML: екранує & < > поза дозволеними тегами,
+    відкидає закриваючі теги без пари, закриває незакриті. Повторний виклик нічого не змінює."""
+    text = _TG_BAD_AMP_RE.sub('&amp;', text)
+    out, stack, pos = [], [], 0
+    for m in _TG_TAG_RE.finditer(text):
+        out.append(text[pos:m.start()].replace('<', '&lt;').replace('>', '&gt;'))
+        closing, name = m.group(1) == '/', m.group(2).lower()
+        if not closing:
+            stack.append(name)
+            out.append(m.group(0))
+        elif name in stack:
+            while stack:  # закриваємо і все, що відкрите всередині (правильна вкладеність)
+                top = stack.pop()
+                out.append(f'</{top}>')
+                if top == name:
+                    break
+        pos = m.end()
+    out.append(text[pos:].replace('<', '&lt;').replace('>', '&gt;'))
+    out.extend(f'</{tag}>' for tag in reversed(stack))
+    return ''.join(out)
+
+def crop_html(text, limit):
+    """Обрізає HTML-текст до ~limit символів по межі абзацу / речення / слова,
+    не розриваючи тегів і сутностей; незакриті теги закриваються."""
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    lt, gt = cut.rfind('<'), cut.rfind('>')
+    if lt > gt:                      # обірваний тег у кінці
+        cut = cut[:lt]
+    amp = cut.rfind('&')
+    if amp != -1 and ';' not in cut[amp:]:  # обірвана сутність
+        cut = cut[:amp]
+    floor = int(len(cut) * 0.6)      # не відкидаємо більше 40 % тексту заради красивої межі
+    for sep in ('\n\n', '. ', '! ', '? ', '.\n', '\n', ' '):
+        i = cut.rfind(sep)
+        if i >= floor:
+            cut = cut[:i + 1] if sep[0] in '.!?' else cut[:i]
+            break
+    cut = cut.rstrip()
+    if not cut.endswith(('.', '!', '?', '…')):
+        cut += '…'
+    return sanitize_telegram_html(cut)
+
+def html_to_plain(text):
+    """Запасний варіант, якщо Telegram усе ж не прийняв розмітку: чистий текст без сирих тегів,
+    посилання <a href=X>Y</a> -> «Y: X»."""
+    text = re.sub(r'<a\b[^>]*href=["\']([^"\']+)["\'][^>]*>(.*?)</a>', r'\2: \1', text, flags=re.I | re.S)
+    text = re.sub(r'<[^>]+>', '', text)
+    return html_lib.unescape(text)
+
+def _mask_token(s):
+    return str(s).replace(TELEGRAM_BOT_TOKEN, '***') if TELEGRAM_BOT_TOKEN else str(s)
+
+class TelegramRetryableError(Exception):
+    """Тимчасова помилка Telegram (мережа, 429, 5xx) — є сенс повторити."""
+
+def _post_telegram(api_url, payload):
+    try:
+        return requests.post(api_url, data=payload, timeout=60)
+    except requests.RequestException as e:
+        raise TelegramRetryableError(f"Мережева помилка Telegram: {_mask_token(e)}")
+
+# D-16: повторюємо лише тимчасові помилки; 4xx (погане фото тощо) — одразу у фолбек
+@retry(stop=stop_after_attempt(4), wait=wait_exponential(multiplier=2, min=3, max=30),
+       retry=retry_if_exception_type(TelegramRetryableError), reraise=True)
 def execute_telegram_request(api_url, payload):
-    resp = requests.post(api_url, data=payload)
-    
-    # ЗАХИСТ ВІД ЗЛАМАНИХ ТЕГІВ: Якщо Telegram лається на розмітку
+    resp = _post_telegram(api_url, payload)
+
+    # ЗАХИСТ ВІД ЗЛАМАНИХ ТЕГІВ: відправляємо чистим текстом, а не сирими тегами
     if resp.status_code == 400 and "parse entities" in resp.text.lower():
-        logging.warning("⚠️ Помилка HTML-розмітки (ймовірно через обрізку тексту). Відправляємо без HTML...")
+        logging.warning(f"⚠️ Telegram не прийняв HTML-розмітку ({resp.text[:200]}). Відправляємо чистим текстом...")
         if 'media' in payload:
             media_objs = json.loads(payload['media'])
-            if 'parse_mode' in media_objs[0]: del media_objs[0]['parse_mode']
+            media_objs[0].pop('parse_mode', None)
+            if 'caption' in media_objs[0]:
+                media_objs[0]['caption'] = html_to_plain(media_objs[0]['caption'])
             payload['media'] = json.dumps(media_objs)
-        elif 'parse_mode' in payload: 
-            del payload['parse_mode']
-        resp = requests.post(api_url, data=payload) 
-        
-    if resp.status_code != 200: raise Exception(f"Telegram Error: {resp.text}")
-    return True
+        payload.pop('parse_mode', None)
+        for key in ('text', 'caption'):
+            if key in payload:
+                payload[key] = html_to_plain(payload[key])
+        resp = _post_telegram(api_url, payload)
+
+    if resp.status_code == 200:
+        return True
+    if resp.status_code == 429:
+        try:
+            retry_after = int(resp.json().get('parameters', {}).get('retry_after', 5))
+        except Exception:
+            retry_after = 5
+        retry_after = min(max(retry_after, 1), 60)
+        logging.warning(f"⏳ Telegram 429: забагато запитів, чекаємо {retry_after} с")
+        time.sleep(retry_after)
+        raise TelegramRetryableError(f"Telegram 429: {resp.text[:200]}")
+    if resp.status_code >= 500:
+        raise TelegramRetryableError(f"Telegram {resp.status_code}: {resp.text[:200]}")
+    raise Exception(f"Telegram Error {resp.status_code}: {resp.text[:300]}")
 
 def deduplicate_news(client, articles, recent_history=None, stats=None):
     if not articles: return articles, {}
@@ -412,7 +507,8 @@ def deduplicate_news(client, articles, recent_history=None, stats=None):
 
         data = json.loads(text_response)  
         
-        keep_ids = [int(item) for item in data.get("keep", []) if str(item).isdigit()]
+        # dict.fromkeys — прибираємо повтори ID, зберігаючи порядок (D-13: інакше новина вийде двічі)
+        keep_ids = list(dict.fromkeys(int(item) for item in data.get("keep", []) if str(item).isdigit()))
         rejected_items = data.get("rejected", []) # Список об'єктів [{"id": X, "reason": "..."}, ...]
         
         filtered_articles = [articles[i] for i in keep_ids if i < len(articles)]  
@@ -473,8 +569,11 @@ def scrape_feeds(stats):
         try:   
             response = scraper.get(feed_url, headers={'Accept': 'application/rss+xml, application/xml, text/xml, */*'}, timeout=15)
             if response.status_code not in [200, 301, 302]: raise Exception(f"HTTP {response.status_code}")
-            feed = feedparser.parse(response.text)
-            if not feed.entries: continue
+            # D-20: байти, а не текст — feedparser сам візьме кодування з XML-заголовка
+            feed = feedparser.parse(response.content)
+            # D-18: порожня стрічка (або HTML-сторінка замість RSS) — це помилка джерела, а не «нічого нового»
+            if not feed.entries:
+                raise Exception("Порожня стрічка: 0 записів (можливо, сайт віддав сторінку замість RSS)")
             cursor.execute("UPDATE sources SET status = 'ok', error_count = 0, last_error_log = NULL, last_checked = %s WHERE id = %s", (now, source_id))
             conn.commit()
         except Exception as e:
@@ -497,13 +596,16 @@ def scrape_feeds(stats):
                 continue
               
             article_time = time.time()
+            published_at = None  # D-14: час публікації на сайті (UTC); None — у стрічці дати немає
             if hasattr(entry, 'published_parsed') and entry.published_parsed:
                 article_time = calendar.timegm(entry.published_parsed)
                 if current_time - article_time > MAX_AGE_SECONDS:
                     stats["funnel"]["already_seen"] += 1
                     continue
+                # Дата «з майбутнього» (неправильний часовий пояс у стрічці) -> вважаємо, що опубліковано зараз
+                published_at = datetime.datetime.fromtimestamp(min(article_time, current_time), datetime.timezone.utc).replace(tzinfo=None)
                   
-            description = entry.get('summary', title)
+            description = clean_description(entry.get('summary', '')) or title
             if not is_quality_article(title, description, url): 
                 stats["funnel"]["rejected_by_keywords"] += 1
                 continue
@@ -551,10 +653,10 @@ def scrape_feeds(stats):
             images = extract_image_urls(entry)
             try:
                 cursor.execute('''
-                    INSERT INTO articles (guid, source_id, title, description, url, image_urls, status, embedding)
-                    VALUES (%s, %s, %s, %s, %s, %s, 'pending', %s)
+                    INSERT INTO articles (guid, source_id, title, description, url, image_urls, status, embedding, published_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, 'pending', %s, %s)
                     ON CONFLICT (guid) DO NOTHING
-                ''', (guid, source_id, title, description, url, json.dumps(images), vector_str))
+                ''', (guid, source_id, title, description, url, json.dumps(images), vector_str, published_at))
                 # Комітимо КОЖНУ статтю окремо: помилка наступної вставки (rollback)
                 # більше не скасовує все, що вже зібрано в цьому запуску (AUDIT A3 / T-05)
                 conn.commit()
@@ -590,23 +692,29 @@ def process_backlog(stats):
 
     # --- ДОДАНО: Автоматичне очищення старого беклогу ---
     try:
-        cursor.execute("UPDATE articles SET status = 'expired' WHERE status = 'pending' AND created_at < NOW() - INTERVAL '12 hours'")
+        # D-14: вік рахуємо від публікації на сайті (якщо відома), а не від моменту збору
+        cursor.execute(
+            "UPDATE articles SET status = 'expired' WHERE status = 'pending' "
+            "AND COALESCE(published_at, created_at) < NOW() - make_interval(secs => %s)",
+            (MAX_AGE_SECONDS,)
+        )
         conn.commit()
     except Exception as db_err:
         logging.error(f"Помилка очищення старого беклогу: {db_err}")
     # ----------------------------------------------------
       
     cursor.execute("""
-        SELECT a.guid, a.title, a.description, a.url, a.image_urls, s.name, EXTRACT(EPOCH FROM a.created_at) as timestamp
+        SELECT a.guid, a.title, a.description, a.url, a.image_urls, s.name,
+               EXTRACT(EPOCH FROM COALESCE(a.published_at, a.created_at)) as timestamp
         FROM articles a JOIN sources s ON a.source_id = s.id 
-        WHERE a.status = 'pending' ORDER BY a.created_at DESC
+        WHERE a.status = 'pending' ORDER BY COALESCE(a.published_at, a.created_at) DESC
     """)
     rows = cursor.fetchall()
     # ... далі код залишається без змін ...
     backlog = []
     for r in rows:
         backlog.append({
-            'guid': r[0], 'title': r[1], 'description': r[2], 'url': r[3], 
+            'guid': r[0], 'title': r[1], 'description': clean_description(r[2]) or r[1], 'url': r[3], 
             'image_urls': r[4] if r[4] else [], 'source': r[5], 'timestamp': r[6] or time.time()
         })
           
@@ -816,7 +924,9 @@ def process_backlog(stats):
                 else: stats["published"]["text_only"] += 1
                 stats["published"]["sources"][item.get('source', 'Джерело')] = stats["published"]["sources"].get(item.get('source', 'Джерело'), 0) + 1
                   
-                time.sleep(45)
+                # Пауза між постами (ліміти Telegram, R-09); після останнього поста запуску чекати нема чого (D-17)
+                if idx < len(batch) - 1:
+                    time.sleep(45)
             except Exception as db_err: 
                 logging.error(f"Помилка БД: {db_err}")
         else:
@@ -844,18 +954,27 @@ def send_to_telegram(text, url, source_name, image_urls=None, tags=""):
     if not image_urls: image_urls = []
     elif isinstance(image_urls, str): image_urls = [image_urls]
     
-    crop_msg = "...\n\n👉 <i>Деталі за посиланням нижче</i> 👇"
+    crop_msg = "\n\n👉 <i>Деталі за посиланням нижче</i> 👇"
+
+    # D-12: текст від Gemini — у безпечний HTML (екранування & < >, закриті теги)
+    text = sanitize_telegram_html(text)
+    extracted_tags = sanitize_telegram_html(extracted_tags)
     
     # 3. ДИНАМІЧНИЙ ЛІМІТ з урахуванням витягнутих хештегів
     safe_caption_limit = 920 - len(extracted_tags) - len(tags)
     
+    # D-12: обрізаємо по межі речення/слова, не розриваючи теги (поріг — як раніше,
+    # місце під «Деталі за посиланням» віднімаємо лише з обрізаного тексту)
     if image_urls and len(text) > safe_caption_limit: 
-        text = text[:safe_caption_limit] + crop_msg
+        text = crop_html(text, safe_caption_limit - len(crop_msg)) + crop_msg
     elif not image_urls and len(text) > 3900: 
-        text = text[:3900] + crop_msg
+        text = crop_html(text, 3900 - len(crop_msg)) + crop_msg
     
     # Збираємо повідомлення назад: текст + згенеровані хештеги + статичні теги
-    full_message = f"{text}{extracted_tags}{tags}\n\n🔗 Джерело: <a href='{url}'>{source_name}</a>"
+    # D-19: URL і назва джерела — з екрануванням
+    safe_url = html_lib.escape(url or '', quote=True)
+    safe_source = html_lib.escape(source_name or 'Джерело', quote=False)
+    full_message = f"{text}{extracted_tags}{tags}\n\n🔗 Джерело: <a href=\"{safe_url}\">{safe_source}</a>"
     
     payload = {'chat_id': TELEGRAM_CHANNEL_ID}
     

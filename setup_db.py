@@ -47,13 +47,15 @@ def setup_database():
             status VARCHAR(50) DEFAULT 'pending',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             rejection_reason TEXT,
-            embedding vector
+            embedding vector,
+            published_at TIMESTAMP
         )
         """)
 
         # Для баз, створених старою версією скрипта (без цих колонок)
         cursor.execute("ALTER TABLE articles ADD COLUMN IF NOT EXISTS rejection_reason TEXT")
         cursor.execute("ALTER TABLE articles ADD COLUMN IF NOT EXISTS embedding vector")
+        cursor.execute("ALTER TABLE articles ADD COLUMN IF NOT EXISTS published_at TIMESTAMP")
 
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS run_analytics (
