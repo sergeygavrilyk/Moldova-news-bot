@@ -46,6 +46,7 @@ cron-job.org ──(HTTP POST, ~щогодини вдень)──▶ GitHub Act
 | `requirements.txt` | Python-залежності |
 | `.github/workflows/news_bot_run.yml` | GitHub Actions workflow (тригер `workflow_dispatch`) |
 | `.env` | Секрети для локального запуску. **Не комітиться** (є в `.gitignore`). Шаблон — `.env.example` |
+| `tools/check_feeds.py` | Оцінка RSS-джерел правилами бота (workflow «Check RSS feeds»), список кандидатів — `tools/feed_candidates.json` |
 | `check_models.py` | Утиліта: показує, які моделі Gemini доступні для вашого ключа |
 | `test_rss.py` | Утиліта: перевіряє, що RSS-посилання відповідають (список джерел продубльовано всередині файлу) |
 | `analytics.json` | **Застарілий** файл аналітики з часів до Supabase (до 17.09.2026). Зараз аналітика — у таблиці `run_analytics` |
