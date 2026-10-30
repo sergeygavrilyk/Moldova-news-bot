@@ -15,6 +15,15 @@ def setup_database():
         conn = psycopg2.connect(DATABASE_URL)
         cursor = conn.cursor()
 
+        # pgvector: тип vector для ембедингів (семантичні дублі). Окремою транзакцією:
+        # якщо роль не має прав на CREATE EXTENSION, решта схеми все одно створиться.
+        try:
+            cursor.execute("CREATE EXTENSION IF NOT EXISTS vector")
+            conn.commit()
+        except Exception as ext_err:
+            conn.rollback()
+            print(f"⚠️ Не вдалося увімкнути розширення vector: {ext_err}")
+
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS sources (
             id SERIAL PRIMARY KEY,
@@ -36,9 +45,15 @@ def setup_database():
             url TEXT,
             image_urls JSONB,
             status VARCHAR(50) DEFAULT 'pending',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            rejection_reason TEXT,
+            embedding vector
         )
         """)
+
+        # Для баз, створених старою версією скрипта (без цих колонок)
+        cursor.execute("ALTER TABLE articles ADD COLUMN IF NOT EXISTS rejection_reason TEXT")
+        cursor.execute("ALTER TABLE articles ADD COLUMN IF NOT EXISTS embedding vector")
 
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS run_analytics (

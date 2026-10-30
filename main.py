@@ -308,7 +308,7 @@ def execute_telegram_request(api_url, payload):
     return True
 
 def deduplicate_news(client, articles, recent_history=None, stats=None):
-    if not articles: return articles
+    if not articles: return articles, {}
     logging.info("Аналіз на дублікати та збір причин відхилення через Gemini...")
     
     history = recent_history[-75:] if recent_history else []
@@ -396,9 +396,13 @@ def deduplicate_news(client, articles, recent_history=None, stats=None):
             
         return filtered_articles, reasons_map  
         
-    except Exception as e:  
-        logging.error(f"❌ Помилка Gemini API у deduplicate_news: {e}. Пропускаємо фільтрацію без втрати новин.")  
-        return articles, {}
+    except Exception as e:
+        # Фільтр не спрацював -> НЕ публікуємо неперевірене (AUDIT A4 / T-06).
+        # Повертаємо None: статті лишаються 'pending' і підуть у фільтр наступного запуску.
+        logging.error(f"❌ Помилка Gemini API у deduplicate_news: {e}. Публікацію в цьому запуску пропущено, статті лишаються в черзі.")
+        if stats is not None:
+            stats["errors_count"] += 1
+        return None, {}
 
 def prioritize_ukraine_news(backlog_items):
     ukraine_keywords = [r'\bucrain', r'\bzelenski', r'\bkiev', r'\bkiiv', r'\bodesa', r'\bodessa', r'\brefugiat', r'\bprotectie temporara', r'\bprotecție temporară', r'\bprivremen\w*\s+protectie', r'\bукраин', r'\bзеленск', r'\bкиев', r'\bодесс', r'\bбеженц']
@@ -439,7 +443,9 @@ def scrape_feeds(stats):
             feed = feedparser.parse(response.text)
             if not feed.entries: continue
             cursor.execute("UPDATE sources SET status = 'ok', error_count = 0, last_error_log = NULL, last_checked = %s WHERE id = %s", (now, source_id))
-        except Exception as e:   
+            conn.commit()
+        except Exception as e:
+            conn.rollback()  # на випадок, якщо впав сам UPDATE — інакше наступні запити не виконаються
             cursor.execute("UPDATE sources SET error_count = error_count + 1, last_error_log = %s, last_checked = %s WHERE id = %s", (str(e), now, source_id))
             cursor.execute("SELECT error_count FROM sources WHERE id = %s", (source_id,))
             if cursor.fetchone()[0] >= 3: cursor.execute("UPDATE sources SET status = 'error' WHERE id = %s", (source_id,))
@@ -516,6 +522,9 @@ def scrape_feeds(stats):
                     VALUES (%s, %s, %s, %s, %s, %s, 'pending', %s)
                     ON CONFLICT (guid) DO NOTHING
                 ''', (guid, source_id, title, description, url, json.dumps(images), vector_str))
+                # Комітимо КОЖНУ статтю окремо: помилка наступної вставки (rollback)
+                # більше не скасовує все, що вже зібрано в цьому запуску (AUDIT A3 / T-05)
+                conn.commit()
             except Exception as e:
                 logging.error(f"Ошибка записи в БД: {e}")
                 conn.rollback()
@@ -633,6 +642,11 @@ def process_backlog(stats):
     
     len_before = len(candidate_batch)
     candidate_batch, reasons_map = deduplicate_news(client, candidate_batch, recent_history_titles, stats)
+    if candidate_batch is None:
+        # Фільтр Gemini недоступний: нічого не відхиляємо і не публікуємо (статті лишаються 'pending')
+        cursor.close()
+        conn.close()
+        return
     stats["funnel"]["duplicates_removed_by_ai"] += (len_before - len(candidate_batch))
 
     # --- ВИПРАВЛЕННЯ БЕКЛОГУ: позначаємо відхилені новини як rejected з причиною ---

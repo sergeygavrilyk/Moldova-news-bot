@@ -3,15 +3,23 @@ name: Run Moldova News Bot
 on:
   workflow_dispatch:
 
+# Не більше одного запуску одночасно: новий чекає, поки завершиться попередній
+# (захист від подвійної обробки беклогу і дублів у каналі)
+concurrency:
+  group: moldova-news-bot
+  cancel-in-progress: false
+
 jobs:
   run-bot:
     runs-on: ubuntu-latest
+    # Звичайний запуск триває 3–5 хв; якщо щось зависло — зупинити через 20 хв
+    timeout-minutes: 20
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
 
     - name: Set up Python
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@v6
       with:
         python-version: '3.11'
         cache: 'pip'
