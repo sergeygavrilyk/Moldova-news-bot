@@ -1,7 +1,13 @@
 name: Run Moldova News Bot
+run-name: ${{ inputs.dry_run && '🧪 DRY RUN (тестовий запуск)' || 'Run Moldova News Bot' }}
 
 on:
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Тестовий запуск: пости — в адмін-чат з позначкою ТЕСТ, БД не змінюється"
+        type: boolean
+        default: false
 
 # Не більше одного запуску одночасно: новий чекає, поки завершиться попередній
 # (захист від подвійної обробки беклогу і дублів у каналі)
@@ -39,6 +45,8 @@ jobs:
         # Необов'язково: списки моделей через кому (Settings -> Variables). Порожньо = значення з main.py
         GEMINI_FILTER_MODELS: ${{ vars.GEMINI_FILTER_MODELS }}
         GEMINI_TRANSLATE_MODELS: ${{ vars.GEMINI_TRANSLATE_MODELS }}
+        DRY_RUN: ${{ inputs.dry_run }}
       run: |
-        python setup_db.py
+        # setup_db.py змінює БД — у тестовому запуску не виконуємо
+        if [ "$DRY_RUN" != "true" ]; then python setup_db.py; fi
         python main.py

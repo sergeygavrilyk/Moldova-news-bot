@@ -49,6 +49,9 @@ TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHANNEL_ID = os.getenv('TELEGRAM_CHANNEL_ID')
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 ADMIN_CHAT_ID = os.getenv('ADMIN_CHAT_ID') 
+# T-11: тестовий запуск — увесь цикл, але БД лише на читання, а пости йдуть в адмін-чат з позначкою «ТЕСТ»
+DRY_RUN = os.getenv('DRY_RUN', '').strip().lower() in ('1', 'true', 'yes')
+DRY_RUN_NEW_ARTICLES = []  # нові статті з RSS у тестовому запуску (у БД не записуються)
 DATABASE_URL = os.getenv('DATABASE_URL')
 
 
@@ -113,8 +116,51 @@ def run_model_cascade(task, models, call):
     # Інша помилка — її підхопить @retry (tenacity) і повторить каскад після паузи
     raise last_error
 
+class _ReadOnlyCursor:
+    """DRY_RUN: SELECT виконується по-справжньому, INSERT/UPDATE/DELETE/DDL — лише пишуться в лог."""
+    _WRITE = ('INSERT', 'UPDATE', 'DELETE', 'ALTER', 'CREATE', 'DROP', 'TRUNCATE', 'VACUUM')
+
+    def __init__(self, cursor):
+        self._cursor, self._skipped = cursor, False
+
+    def execute(self, sql, params=None):
+        first = sql.lstrip().split(None, 1)[0].upper() if sql.strip() else ''
+        if first in self._WRITE:
+            self._skipped = True
+            logging.debug(f"🧪 DRY_RUN: пропущено запис у БД: {' '.join(sql.split())[:80]}")
+            return None
+        self._skipped = False
+        return self._cursor.execute(sql, params)
+
+    def fetchall(self):
+        return [] if self._skipped else self._cursor.fetchall()
+
+    def fetchone(self):
+        return None if self._skipped else self._cursor.fetchone()
+
+    def close(self):
+        self._cursor.close()
+
+class _ReadOnlyConnection:
+    def __init__(self, conn):
+        self._conn = conn
+
+    def cursor(self):
+        return _ReadOnlyCursor(self._conn.cursor())
+
+    def commit(self):
+        pass  # у тестовому запуску нічого не зберігаємо
+
+    def rollback(self):
+        self._conn.rollback()
+
+    def close(self):
+        self._conn.rollback()
+        self._conn.close()
+
 def get_db_connection():
-    return psycopg2.connect(DATABASE_URL)
+    conn = psycopg2.connect(DATABASE_URL)
+    return _ReadOnlyConnection(conn) if DRY_RUN else conn
 
 def send_analytics_to_admin(stats):
     if not ADMIN_CHAT_ID: return
@@ -139,6 +185,7 @@ def send_analytics_to_admin(stats):
         exhausted_str = f"\n⛽ Квоту вичерпано: {', '.join(sorted(EXHAUSTED_MODELS))}" if EXHAUSTED_MODELS else ""
 
         message = (
+            f"{'🧪 <b>ТЕСТОВИЙ ЗАПУСК (DRY_RUN)</b> — нічого не опубліковано й не записано в БД' + chr(10) + chr(10) if DRY_RUN else ''}"
             f"📊 <b>Розширений звіт бота (Молдова)</b>\n\n"
             f"⏱ Час: {stats['execution_time']} сек | ⚠️ Помилок: {stats['errors_count']} | 🔄 Невдалих спроб моделей: {stats['gemini_retries']}\n"
             f"🤖 Моделі: {models_str}{exhausted_str}\n"
@@ -705,6 +752,12 @@ def scrape_feeds(stats):
             except Exception as e:
                 logging.error(f"Ошибка записи в БД: {e}")
                 conn.rollback()
+
+            if DRY_RUN:  # у БД нічого не записано — передаємо статтю у відбір напряму
+                DRY_RUN_NEW_ARTICLES.append({
+                    'guid': guid, 'title': title, 'description': description, 'url': url,
+                    'image_urls': images, 'source': source_name, 'timestamp': article_time,
+                })
               
             db_urls.add(url)
             db_titles.add(title)
@@ -760,6 +813,11 @@ def process_backlog(stats):
             'image_urls': r[4] if r[4] else [], 'source': r[5], 'timestamp': r[6] or time.time()
         })
           
+    if DRY_RUN and DRY_RUN_NEW_ARTICLES:
+        known = {item['guid'] for item in backlog}
+        backlog.extend(a for a in DRY_RUN_NEW_ARTICLES if a['guid'] not in known)
+        logging.info(f"🧪 DRY_RUN: до черги додано {len(DRY_RUN_NEW_ARTICLES)} нових статей з RSS (без запису в БД)")
+
     stats["backlog"]["total_size"] = len(backlog)
     source_counts = {}
     for item in backlog: source_counts[item.get('source', 'Невідомо')] = source_counts.get(item.get('source', 'Невідомо'), 0) + 1
@@ -834,6 +892,9 @@ def process_backlog(stats):
 
     # --- ВИПРАВЛЕННЯ БЕКЛОГУ: позначаємо відхилені новини як rejected з причиною ---
     approved_guids = {item['guid'] for item in candidate_batch}
+
+    if DRY_RUN:
+        send_dry_run_filter_report(list(evaluated_guids.values()), approved_guids, reasons_map, candidate_batch)
     
     for idx, item in enumerate(candidate_batch):
         # Якщо стаття не увійшла в approved, вона відхилена
@@ -976,7 +1037,7 @@ def process_backlog(stats):
                   
                 # Пауза між постами (ліміти Telegram, R-09); після останнього поста запуску чекати нема чого (D-17)
                 if idx < len(batch) - 1:
-                    time.sleep(45)
+                    time.sleep(10 if DRY_RUN else 45)
             except Exception as db_err: 
                 logging.error(f"Помилка БД: {db_err}")
         else:
@@ -1003,6 +1064,38 @@ def apply_update_prefix(text, is_update):
     if text.lower().startswith('<b>'):
         return text[:3] + UPDATE_PREFIX + text[3:]
     return UPDATE_PREFIX + text
+
+DRY_RUN_HEADER = "🧪 <b>ТЕСТ — не опубліковано в каналі</b>\n\n"
+
+def target_chat_id():
+    """Куди надсилати пости: у тестовому запуску — в адмін-чат, інакше — в канал."""
+    return ADMIN_CHAT_ID if DRY_RUN else TELEGRAM_CHANNEL_ID
+
+def send_admin_html(html_text):
+    """Службове повідомлення адміну (HTML), без падіння бота при помилці."""
+    if not ADMIN_CHAT_ID:
+        logging.info(html_to_plain(html_text))
+        return False
+    try:
+        return execute_telegram_request(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                                        {'chat_id': ADMIN_CHAT_ID, 'text': html_text[:4000], 'parse_mode': 'HTML'})
+    except Exception as e:
+        logging.error(f"Не вдалося надіслати повідомлення адміну: {_mask_token(e)}")
+        return False
+
+def send_dry_run_filter_report(evaluated, approved_guids, reasons_map, kept_ordered):
+    """DRY_RUN: що фільтр залишив і що відкинув (з категоріями) — щоб оцінити зміни промпту."""
+    esc = lambda s: html_lib.escape(str(s or ''), quote=False)
+    lines = [f"🧪 <b>ТЕСТ: фільтр Gemini</b> ({MODEL_USAGE.get('filter') or '—'})", "",
+             f"✅ <b>Залишено {len(kept_ordered)}</b> (у пости підуть перші {BATCH_SIZE}):"]
+    for i, item in enumerate(kept_ordered):
+        mark = "🔄 " if item.get('is_update') else ""
+        lines.append(f"{i + 1}. {mark}{esc(item['title'][:110])} <i>({esc(item.get('source'))})</i>")
+    lines += ["", "✖ <b>Відкинуто:</b>"]
+    for idx, item in enumerate(evaluated):
+        if item['guid'] not in approved_guids:
+            lines.append(f"• [{esc(reasons_map.get(idx, NO_REASON))}] {esc(item['title'][:100])}")
+    send_admin_html("\n".join(lines))
 
 def send_to_telegram(text, url, source_name, image_urls=None, tags=""):
    
@@ -1040,7 +1133,13 @@ def send_to_telegram(text, url, source_name, image_urls=None, tags=""):
     safe_source = html_lib.escape(source_name or 'Джерело', quote=False)
     full_message = f"{text}{extracted_tags}{tags}\n\n🔗 Джерело: <a href=\"{safe_url}\">{safe_source}</a>"
     
-    payload = {'chat_id': TELEGRAM_CHANNEL_ID}
+    if DRY_RUN:
+        full_message = DRY_RUN_HEADER + full_message
+        if not ADMIN_CHAT_ID:
+            logging.info(f"🧪 DRY_RUN (ADMIN_CHAT_ID не задано) — пост лише в лозі:\n{full_message}")
+            return True
+
+    payload = {'chat_id': target_chat_id()}
     
     # Структура відправки (з Молдовського)
     if len(image_urls) == 0:
@@ -1070,7 +1169,7 @@ def send_to_telegram(text, url, source_name, image_urls=None, tags=""):
         # ФОЛБЕК: Якщо відхилено фото/медіагрупу, відправляємо як голий текст
         if len(image_urls) > 0:
             logging.warning(f"⚠️ Telegram відхилив медіа ({e}). Відправляємо як текст...")
-            payload_text = {'chat_id': TELEGRAM_CHANNEL_ID, 'text': full_message, 'parse_mode': 'HTML'}
+            payload_text = {'chat_id': target_chat_id(), 'text': full_message, 'parse_mode': 'HTML'}
             api_url_text = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
             try:
                 return execute_telegram_request(api_url_text, payload_text)
@@ -1088,6 +1187,8 @@ def main():
         exit(1)
         
     start_time = time.time()
+    if DRY_RUN:
+        logging.warning("🧪 DRY_RUN: тестовий запуск — БД лише на читання, пости йдуть в адмін-чат, а не в канал")
     logging.info(f"🤖 Моделі фільтра: {', '.join(FILTER_MODELS)}")
     logging.info(f"🤖 Моделі перекладу: {', '.join(TRANSLATE_MODELS)}")
     # ... далі йде словник stats ...
@@ -1109,7 +1210,7 @@ def main():
         stats["errors_count"] += 1
         if ADMIN_CHAT_ID:
             requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", 
-                          data={'chat_id': ADMIN_CHAT_ID, 'text': f"⚠️ ALARM: Скрипт впав з помилкою: {e}"})
+                          data={'chat_id': ADMIN_CHAT_ID, 'text': f"{'🧪 DRY_RUN — ' if DRY_RUN else ''}⚠️ ALARM: Скрипт впав з помилкою: {_mask_token(e)}"}, timeout=60)
     finally:
         stats["execution_time"] = round(time.time() - start_time, 1)
         stats["gemini_retries"] = MODEL_USAGE["failed_attempts"]
