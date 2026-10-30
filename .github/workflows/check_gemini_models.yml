@@ -1,0 +1,29 @@
+name: Check Gemini models
+
+# Перевіряє, які моделі Gemini реально відповідають для GEMINI_API_KEY.
+# Кожна модель = 1 короткий запит з її денної квоти. Нічого не публікує і не пише в БД.
+on:
+  workflow_dispatch:
+    inputs:
+      models:
+        description: "Моделі через кому"
+        required: false
+        default: "gemini-3.8-flash,gemini-3.7-flash,gemini-3.6-flash,gemini-3.5-flash,gemini-2.5-flash,gemini-3-flash-preview,gemini-flash-latest,gemini-3.5-flash-lite,gemini-3.1-flash-lite,gemini-2.5-flash-lite,gemini-flash-lite-latest,gemma-4-31b-it"
+  push:
+    branches: [tools/check-gemini-models]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install requests
+      - name: Check models
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          MODELS_TO_CHECK: ${{ inputs.models || 'gemini-3.8-flash,gemini-3.7-flash,gemini-3.6-flash,gemini-3.5-flash,gemini-2.5-flash,gemini-3-flash-preview,gemini-flash-latest,gemini-3.5-flash-lite,gemini-3.1-flash-lite,gemini-2.5-flash-lite,gemini-flash-lite-latest,gemma-4-31b-it' }}
+        run: python tools/check_gemini_models.py
