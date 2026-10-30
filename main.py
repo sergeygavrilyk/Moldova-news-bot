@@ -228,12 +228,13 @@ def send_analytics_to_admin(stats):
         pub_src_str = ", ".join([f"{k}: {v}" for k, v in stats['published']['sources'].items()]) if stats['published']['sources'] else "Немає"
         models_str = f"фільтр — {MODEL_USAGE['filter'] or '—'} | переклад — {MODEL_USAGE['translate'] or '—'}"
         exhausted_str = f"\n⛽ Квоту вичерпано: {', '.join(sorted(EXHAUSTED_MODELS))}" if EXHAUSTED_MODELS else ""
+        failed_src_str = f"\n🔴 Недоступні джерела: {', '.join(stats['failed_sources'])}" if stats.get('failed_sources') else ""
 
         message = (
             f"{'🧪 <b>ТЕСТОВИЙ ЗАПУСК (DRY_RUN)</b> — нічого не опубліковано й не записано в БД' + chr(10) + chr(10) if DRY_RUN else ''}"
             f"📊 <b>Розширений звіт бота (Молдова)</b>\n\n"
             f"⏱ Час: {stats['execution_time']} сек | ⚠️ Помилок: {stats['errors_count']} | 🔄 Невдалих спроб моделей: {stats['gemini_retries']}\n"
-            f"🤖 Моделі: {models_str}{exhausted_str}\n"
+            f"🤖 Моделі: {models_str}{exhausted_str}{failed_src_str}\n"
             f"{('🧾 Спроби: ' + model_calls_summary() + chr(10)) if MODEL_CALLS else ''}"
             f"🪙 <b>Токени (сьогодні/тиждень/місяць):</b>\n   {tokens_day:,} / {tokens_week:,} / {tokens_month:,}\n\n"
             f"🔍 <b>Воронка фільтрації:</b>\n▪️ Знайдено в RSS: {stats['funnel']['scraped_total']}\n▪️ По джерелах: {scraped_src_str}\n"
@@ -251,11 +252,23 @@ def send_analytics_to_admin(stats):
     except Exception as e:
         logging.error(f"Помилка відправки статистики в Telegram: {e}")
 
+# D-01: після SOURCE_ERROR_LIMIT помилок поспіль джерело переходить у 'error' і опитується
+# лише раз на SOURCE_RETRY_HOURS год; щойно стрічка запрацює — автоматично повертається в 'ok'.
+# Статус 'disabled' (вимкнено вручну) бот не чіпає.
+SOURCE_ERROR_LIMIT = 3
+SOURCE_RETRY_HOURS = 6
+
 def get_active_sources():
+    """Джерела для опитування: усі 'ok' + 'error', з останньої спроби яких минуло SOURCE_RETRY_HOURS год."""
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT id, name, url FROM sources WHERE status = 'ok'")
+        cursor.execute(
+            "SELECT id, name, url, status FROM sources WHERE status = 'ok' "
+            "OR (status = 'error' AND (last_checked IS NULL OR last_checked < NOW() - make_interval(hours => %s))) "
+            "ORDER BY id",
+            (SOURCE_RETRY_HOURS,)
+        )
         sources = cursor.fetchall()
         cursor.close()
         conn.close()
@@ -263,6 +276,20 @@ def get_active_sources():
     except Exception as e:
         logging.error(f"Помилка читання PostgreSQL: {e}")
         return []
+
+def notify_source_status(source_name, became_ok, error_text=None, error_count=None):
+    """D-01: сповіщення адміну, коли джерело вимикається через помилки або знову запрацювало.
+    У тестовому запуску статуси в БД не змінюються, тож і сповіщень немає."""
+    esc = lambda v: html_lib.escape(str(v or ''), quote=False)
+    if became_ok:
+        msg = f"✅ <b>Джерело знову працює:</b> {esc(source_name)}\nПовернуто в роботу автоматично."
+    else:
+        msg = (f"🔴 <b>Джерело вимкнено:</b> {esc(source_name)}\n"
+               f"{error_count} помилок поспіль. Остання: <code>{esc(_short(_mask_token(error_text), 300))}</code>\n"
+               f"Бот пробуватиме його раз на {SOURCE_RETRY_HOURS} год і сам поверне, коли стрічка запрацює.")
+    logging.warning(html_to_plain(msg))
+    if not DRY_RUN:
+        send_admin_html(msg)
 
 def clean_description(raw, max_len=1500):
     """Опис з RSS без HTML-розмітки й зайвих пробілів (D-15): менше токенів, чистіші ембединги."""
@@ -691,7 +718,7 @@ def scrape_feeds(stats):
         conn.close()
         return
           
-    now = datetime.datetime.now()
+    now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)  # час у БД — UTC
     current_time = time.time()
 
     # ОПТИМІЗАЦІЯ: кешуємо в пам'ять лише недавні URL та заголовки (за останні 3 дні), 
@@ -702,7 +729,7 @@ def scrape_feeds(stats):
     cursor.execute("SELECT title FROM articles WHERE created_at >= NOW() - INTERVAL '3 days'")
     db_titles = {row[0] for row in cursor.fetchall()}
 
-    for source_id, source_name, feed_url in active_sources:
+    for source_id, source_name, feed_url, source_status in active_sources:
         if "scraped_by_source" not in stats["funnel"]: stats["funnel"]["scraped_by_source"] = {}
         source_count = 0    
         try:   
@@ -715,13 +742,27 @@ def scrape_feeds(stats):
                 raise Exception("Порожня стрічка: 0 записів (можливо, сайт віддав сторінку замість RSS)")
             cursor.execute("UPDATE sources SET status = 'ok', error_count = 0, last_error_log = NULL, last_checked = %s WHERE id = %s", (now, source_id))
             conn.commit()
+            if source_status == 'error':
+                notify_source_status(source_name, became_ok=True)
         except Exception as e:
             conn.rollback()  # на випадок, якщо впав сам UPDATE — інакше наступні запити не виконаються
-            cursor.execute("UPDATE sources SET error_count = error_count + 1, last_error_log = %s, last_checked = %s WHERE id = %s", (str(e), now, source_id))
-            cursor.execute("SELECT error_count FROM sources WHERE id = %s", (source_id,))
-            if cursor.fetchone()[0] >= 3: cursor.execute("UPDATE sources SET status = 'error' WHERE id = %s", (source_id,))
-            conn.commit()
-            continue   
+            logging.warning(f"⚠️ Джерело {source_name} недоступне: {e}")
+            stats.setdefault("failed_sources", []).append(source_name)
+            try:
+                cursor.execute("UPDATE sources SET error_count = error_count + 1, last_error_log = %s, last_checked = %s WHERE id = %s", (str(e)[:1000], now, source_id))
+                cursor.execute("SELECT error_count FROM sources WHERE id = %s", (source_id,))
+                row = cursor.fetchone()
+                error_count = row[0] if row else 0
+                if source_status == 'ok' and error_count >= SOURCE_ERROR_LIMIT:
+                    cursor.execute("UPDATE sources SET status = 'error' WHERE id = %s", (source_id,))
+                    conn.commit()
+                    notify_source_status(source_name, became_ok=False, error_text=e, error_count=error_count)
+                else:
+                    conn.commit()
+            except Exception as db_err:
+                logging.error(f"Помилка оновлення статусу джерела {source_name}: {db_err}")
+                conn.rollback()
+            continue
               
         for entry in feed.entries[:15]:   
             stats["funnel"]["scraped_total"] += 1
