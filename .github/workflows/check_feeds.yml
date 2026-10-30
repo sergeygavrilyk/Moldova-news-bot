@@ -1,0 +1,25 @@
+name: Check RSS feeds
+
+# Оцінює RSS-джерела правилами бота (свіжість, фільтр якості, фото в RSS і на сторінці).
+# Нічого не публікує, не пише в БД і не викликає Gemini — секрети не потрібні.
+on:
+  workflow_dispatch:
+  push:
+    branches-ignore: [main]
+    paths:
+      - 'tools/check_feeds.py'
+      - 'tools/feed_candidates.json'
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      - run: pip install -r requirements.txt
+      - name: Check feeds
+        run: python tools/check_feeds.py
