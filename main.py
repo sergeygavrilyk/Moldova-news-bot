@@ -9,6 +9,7 @@ import json
 import re
 import html as html_lib
 import random
+import sys
 import psycopg2
 from urllib.parse import urlparse, urljoin
 from dotenv import load_dotenv
@@ -203,9 +204,9 @@ class _ReadOnlyConnection:
         self._conn.rollback()
         self._conn.close()
 
-def get_db_connection():
+def get_db_connection(read_only=False):
     conn = psycopg2.connect(DATABASE_URL)
-    return _ReadOnlyConnection(conn) if DRY_RUN else conn
+    return _ReadOnlyConnection(conn) if (DRY_RUN or read_only) else conn
 
 def send_analytics_to_admin(stats):
     if not ADMIN_CHAT_ID: return
@@ -1279,7 +1280,180 @@ def send_to_telegram(text, url, source_name, image_urls=None):
             logging.error(f"❌ Критична помилка Telegram API: {e}")
             return False
 
+# ================= ТИЖНЕВИЙ ЗВІТ АДМІНУ (I-06) =================
+# Надсилається з першого запуску понеділка (UTC) — окремий розклад не потрібен.
+# Вручну: GitHub Actions -> «Run Moldova News Bot» -> «weekly_report» (лише звіт, без новин),
+# або локально: python main.py --weekly-report. Звіт лише читає БД.
+WEEKLY_REPORT_DAYS = 7
+OUTCOME_MARKS = {'unavailable': '503', 'quota': '⛽', 'timeout': '⏱', 'bad_response': '⚠️', 'error': '❌'}
+
+def weekly_report_due():
+    """Перший запуск понеділка (UTC): сьогодні понеділок і в run_analytics ще немає записів за сьогодні."""
+    if DRY_RUN:
+        return False
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT EXTRACT(ISODOW FROM NOW() AT TIME ZONE 'UTC')::int,
+                   (SELECT COUNT(*) FROM run_analytics WHERE timestamp >= date_trunc('day', NOW() AT TIME ZONE 'UTC'))
+        """)
+        weekday, runs_today = cursor.fetchone()
+        cursor.close()
+        conn.close()
+        return weekday == 1 and runs_today == 0
+    except Exception as e:
+        logging.error(f"Не вдалося перевірити, чи час тижневого звіту: {e}")
+        return False
+
+def _pct(part, whole):
+    return f"{round(100 * part / whole)}%" if whole else "—"
+
+def build_weekly_report(cursor, days=WEEKLY_REPORT_DAYS, on_demand=False):
+    """Тижневий звіт (HTML) за останні `days` днів: запуски, пости по джерелах, причини відхилень,
+    моделі Gemini, вичерпані квоти, стан джерел. Лише SELECT."""
+    esc = lambda v: html_lib.escape(str(v if v is not None else ''), quote=False)
+    since = f"NOW() - make_interval(days => {int(days)})"
+
+    cursor.execute(f"""
+        SELECT COUNT(*), COALESCE(SUM(errors_count), 0), COUNT(*) FILTER (WHERE errors_count > 0),
+               COALESCE(SUM(tokens_used), 0), COALESCE(AVG(execution_time), 0)
+        FROM run_analytics WHERE timestamp >= {since}
+    """)
+    runs, errors, runs_with_errors, tokens, avg_time = cursor.fetchone()
+
+    cursor.execute(f"""
+        SELECT s.name, a.status, COUNT(*),
+               COUNT(*) FILTER (WHERE jsonb_typeof(a.image_urls) = 'array' AND jsonb_array_length(a.image_urls) > 0)
+        FROM articles a JOIN sources s ON s.id = a.source_id
+        WHERE a.created_at >= {since}
+        GROUP BY s.name, a.status
+    """)
+    by_source, by_status = {}, {}
+    for name, status, n, photos in cursor.fetchall():
+        src = by_source.setdefault(name, {})
+        src[status] = src.get(status, 0) + n
+        if status == 'sent':
+            src['photos'] = src.get('photos', 0) + photos
+        by_status[status] = by_status.get(status, 0) + n
+
+    cursor.execute(f"""
+        SELECT rejection_reason, COUNT(*) FROM articles
+        WHERE status = 'rejected' AND created_at >= {since} GROUP BY rejection_reason
+    """)
+    reasons = {}
+    for raw, n in cursor.fetchall():
+        reason = NO_REASON if raw in (None, '', NO_REASON) else normalize_reason(raw)  # старі причини — до D-04
+        reasons[reason] = reasons.get(reason, 0) + n
+
+    cursor.execute(f"""
+        SELECT task, model, outcome, COUNT(*), COUNT(DISTINCT (created_at)::date)
+        FROM model_calls WHERE created_at >= {since} GROUP BY task, model, outcome
+    """)
+    model_rows = cursor.fetchall()
+    cursor.execute("SELECT MIN(created_at) FROM model_calls")
+    calls_since = cursor.fetchone()[0]
+
+    cursor.execute("SELECT name, status, error_count, last_error_log FROM sources ORDER BY name")
+    sources = cursor.fetchall()
+
+    # ---------- формування тексту ----------
+    today = datetime.datetime.now(datetime.timezone.utc)
+    period = f"{(today - datetime.timedelta(days=days)).strftime('%d.%m')} – {today.strftime('%d.%m.%Y')}"
+    lines = [f"📅 <b>Тижневий звіт бота (Молдова)</b>{' — на вимогу' if on_demand else ''}",
+             f"<i>{period}, час UTC</i>", ""]
+
+    lines.append(f"🚀 Запусків: {runs} | з помилками: {runs_with_errors} (помилок {errors}) | ⏱ у сер. {round(avg_time or 0)} с")
+    lines.append(f"🪙 Токени: {int(tokens):,}")
+    lines.append("")
+
+    sent = by_status.get('sent', 0)
+    photos = sum(v.get('photos', 0) for v in by_source.values())
+    lines.append(f"✅ <b>Опубліковано: {sent}</b> (з фото {_pct(photos, sent)})")
+    for name, v in sorted(by_source.items(), key=lambda kv: (-kv[1].get('sent', 0), kv[0])):
+        extra = []
+        if v.get('rejected'): extra.append(f"відхилено {v['rejected']}")
+        if v.get('failed'): extra.append(f"не надіслано {v['failed']}")
+        sent_n = v.get('sent', 0)
+        photo_part = f" (фото {_pct(v.get('photos', 0), sent_n)})" if sent_n else ""
+        lines.append(f"▪️ {esc(name)} — {sent_n}{photo_part}{', ' + ', '.join(extra) if extra else ''}")
+    total = sum(by_status.values())
+    lines.append(f"📦 Зібрано {total} | відхилено {by_status.get('rejected', 0)} | застаріли {by_status.get('expired', 0)}"
+                 f" | не надіслано {by_status.get('failed', 0)} | у черзі {by_status.get('pending', 0) + by_status.get('processing', 0)}")
+    lines.append("")
+
+    rejected_total = sum(reasons.values())
+    lines.append(f"✖ <b>Причини відхилень ({rejected_total}):</b>")
+    lines.append(" · ".join(f"{esc(r)} {n} ({_pct(n, rejected_total)})" for r, n in sorted(reasons.items(), key=lambda kv: -kv[1])) or "—")
+    lines.append("")
+
+    since_note = ""
+    if calls_since and calls_since > today.replace(tzinfo=None) - datetime.timedelta(days=days):
+        since_note = f" (дані з {calls_since.strftime('%d.%m')})"
+    lines.append(f"🤖 <b>Моделі Gemini</b>{since_note}:")
+    if not model_rows:
+        lines.append("немає даних")
+    stats_by = {}
+    quota = {}
+    for task, model, outcome, n, days_n in model_rows:
+        st = stats_by.setdefault(task, {}).setdefault(model, {})
+        st[outcome] = st.get(outcome, 0) + n
+        if outcome == 'quota':
+            q = quota.setdefault(model, [0, 0])
+            q[0] += n; q[1] = max(q[1], days_n)
+    for task, title in (('filter', 'Фільтр'), ('translate', 'Переклад')):
+        models = stats_by.get(task)
+        if not models:
+            continue
+        ok_total = sum(m.get('ok', 0) for m in models.values())
+        lines.append(f"<b>{title}</b> (успішних {ok_total}):")
+        for model, st in sorted(models.items(), key=lambda kv: -sum(kv[1].values())):
+            tries = sum(st.values())
+            fails = " · ".join(f"{OUTCOME_MARKS.get(o, o)}×{n}" for o, n in sorted(st.items(), key=lambda kv: -kv[1]) if o != 'ok')
+            lines.append(f"▪️ {esc(model.replace('gemini-', ''))} — виконала {_pct(st.get('ok', 0), ok_total)} | "
+                         f"спроб {tries}, вдалих {st.get('ok', 0)} ({_pct(st.get('ok', 0), tries)})"
+                         f"{' | ' + fails if fails else ''}")
+    lines.append("")
+
+    if quota:
+        lines.append("⛽ <b>Вичерпані квоти:</b> " + " · ".join(
+            f"{esc(m.replace('gemini-', ''))} — у {d} з {days} днів (×{n})" for m, (n, d) in sorted(quota.items(), key=lambda kv: -kv[1][0])))
+    elif model_rows:
+        lines.append("⛽ Квоти не вичерпувались")
+    lines.append("")
+
+    working = [n for n, st, _, _ in sources if st == 'ok']
+    lines.append(f"📡 <b>Джерела:</b> працюють {len(working)}")
+    for name, status, error_count, last_error in sources:
+        if status == 'error':
+            lines.append(f"🔴 {esc(name)} — вимкнено через помилки ({error_count}): <code>{esc(_short(last_error, 120))}</code>")
+        elif status == 'ok' and error_count:
+            lines.append(f"🟡 {esc(name)} — помилок поспіль: {error_count}")
+        elif status not in ('ok', 'error'):
+            lines.append(f"⚪️ {esc(name)} — {esc(status)} (вимкнено вручну)")
+    return "\n".join(lines).strip()
+
+def send_weekly_report(on_demand=False):
+    try:
+        conn = get_db_connection(read_only=True)
+        cursor = conn.cursor()
+        report = build_weekly_report(cursor, on_demand=on_demand)
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        logging.error(f"Не вдалося сформувати тижневий звіт: {e}")
+        return False
+    logging.info("📅 Тижневий звіт:\n" + html_to_plain(report))
+    return send_admin_html(report)
+
 def main():
+    # Лише тижневий звіт (ручний запуск): без збору новин, публікацій і записів у БД
+    if '--weekly-report' in sys.argv:
+        if not all([TELEGRAM_BOT_TOKEN, ADMIN_CHAT_ID, DATABASE_URL]):
+            logging.error("Для звіту потрібні TELEGRAM_BOT_TOKEN, ADMIN_CHAT_ID і DATABASE_URL")
+            exit(1)
+        exit(0 if send_weekly_report(on_demand=True) else 1)
+
     # Перевіряємо токени тут, коли скрипт безпосередньо запускається
     if not all([TELEGRAM_BOT_TOKEN, TELEGRAM_CHANNEL_ID, GEMINI_API_KEY, DATABASE_URL]):
         logging.error("Критична помилка: не знайдено базові токени або DATABASE_URL у файлі .env!")
@@ -1290,6 +1464,7 @@ def main():
         logging.warning("🧪 DRY_RUN: тестовий запуск — БД лише на читання, пости йдуть в адмін-чат, а не в канал")
     logging.info(f"🤖 Моделі фільтра: {', '.join(FILTER_MODELS)}")
     logging.info(f"🤖 Моделі перекладу: {', '.join(TRANSLATE_MODELS)}")
+    weekly_due = weekly_report_due()  # до запису цього запуску в run_analytics
     stats = {
         "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'), 
         "execution_time": 0, 
@@ -1347,6 +1522,8 @@ def main():
                 logging.error(f"Помилка збереження статистики моделей: {e}")
             
         send_analytics_to_admin(stats)
+        if weekly_due:
+            send_weekly_report()
 
 if __name__ == "__main__":
     main()
