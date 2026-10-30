@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import types  # ДОДАНО ДЛЯ SAFETY SETTINGS
 import cloudscraper
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_not_exception_type
 from pydantic import BaseModel, Field
 
 class RejectedItem(BaseModel):
@@ -47,7 +47,60 @@ DATABASE_URL = os.getenv('DATABASE_URL')
 MAX_AGE_SECONDS = 43200 # 12 годин
 BATCH_SIZE = 3
 client = genai.Client(api_key=GEMINI_API_KEY)
+
+# --- МОДЕЛІ GEMINI (каскад: перша доступна модель зі списку) ---
+# На безкоштовному тарифі у кожної моделі своя денна квота
+# (flash-моделі ~20 запитів/добу, lite-моделі ~500), тому використовуємо їх по черзі.
+# Змінити без правки коду: GitHub -> Settings -> Secrets and variables -> Actions -> Variables
+# (GEMINI_FILTER_MODELS / GEMINI_TRANSLATE_MODELS, назви через кому).
+DEFAULT_FILTER_MODELS = "gemini-3.5-flash-lite,gemini-3.1-flash-lite,gemini-2.5-flash-lite"
+DEFAULT_TRANSLATE_MODELS = "gemini-3.8-flash,gemini-3.7-flash,gemini-3.6-flash,gemini-3.5-flash,gemini-2.5-flash,gemini-3-flash-preview"
+
+def parse_models(env_name, default):
+    raw = os.getenv(env_name) or default
+    return [m.strip() for m in raw.split(',') if m.strip()]
+
+FILTER_MODELS = parse_models('GEMINI_FILTER_MODELS', DEFAULT_FILTER_MODELS)
+TRANSLATE_MODELS = parse_models('GEMINI_TRANSLATE_MODELS', DEFAULT_TRANSLATE_MODELS)
+
+EXHAUSTED_MODELS = set()  # моделі, чия квота вичерпана в цьому запуску — більше не смикаємо
+MODEL_USAGE = {"filter": None, "translate": None, "failed_attempts": 0}
 # ===================================================
+
+class GeminiQuotaExhausted(Exception):
+    """Усі моделі каскаду вичерпали квоту — повторювати в цьому запуску марно."""
+
+def is_quota_error(error):
+    return getattr(error, 'code', None) == 429 or 'RESOURCE_EXHAUSTED' in str(error)
+
+def run_model_cascade(task, models, call):
+    """Пробує моделі по черзі. Квота вичерпана (429) -> модель пропускається до кінця запуску
+    і одразу береться наступна; інша помилка -> пауза 5 с і наступна модель."""
+    available = [m for m in models if m not in EXHAUSTED_MODELS]
+    if not available:
+        raise GeminiQuotaExhausted(f"{task}: квоту вичерпано для всіх моделей ({', '.join(models)})")
+
+    last_error = None
+    for model in available:
+        try:
+            result = call(model)
+            MODEL_USAGE[task] = model
+            logging.info(f"🤖 {task}: відповіла модель {model}")
+            return result
+        except Exception as e:
+            last_error = e
+            MODEL_USAGE["failed_attempts"] += 1
+            if is_quota_error(e):
+                EXHAUSTED_MODELS.add(model)
+                logging.warning(f"⛽ {task}: квоту моделі {model} вичерпано — переходимо до наступної")
+            else:
+                logging.warning(f"⚠️ {task}: модель {model} недоступна ({e}). Перемикаємось...")
+                time.sleep(5)
+
+    if all(m in EXHAUSTED_MODELS for m in available):
+        raise GeminiQuotaExhausted(f"{task}: квоту вичерпано для всіх моделей ({', '.join(models)})")
+    # Інша помилка — її підхопить @retry (tenacity) і повторить каскад після паузи
+    raise last_error
 
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
@@ -71,10 +124,13 @@ def send_analytics_to_admin(stats):
         scraped_src_str = ", ".join([f"{k}: {v}" for k, v in stats['funnel'].get('scraped_by_source', {}).items()]) if stats['funnel'].get('scraped_by_source') else "Немає"
         backlog_src_str = ", ".join([f"{k}: {v}" for k, v in stats['backlog']['sources'].items()]) if stats['backlog']['sources'] else "Порожньо"
         pub_src_str = ", ".join([f"{k}: {v}" for k, v in stats['published']['sources'].items()]) if stats['published']['sources'] else "Немає"
+        models_str = f"фільтр — {MODEL_USAGE['filter'] or '—'} | переклад — {MODEL_USAGE['translate'] or '—'}"
+        exhausted_str = f"\n⛽ Квоту вичерпано: {', '.join(sorted(EXHAUSTED_MODELS))}" if EXHAUSTED_MODELS else ""
 
         message = (
             f"📊 <b>Розширений звіт бота (Молдова)</b>\n\n"
-            f"⏱ Час: {stats['execution_time']} сек | ⚠️ Помилок: {stats['errors_count']} | 🔄 Ретрай: {stats['gemini_retries']}\n"
+            f"⏱ Час: {stats['execution_time']} сек | ⚠️ Помилок: {stats['errors_count']} | 🔄 Невдалих спроб моделей: {stats['gemini_retries']}\n"
+            f"🤖 Моделі: {models_str}{exhausted_str}\n"
             f"🪙 <b>Токени (сьогодні/тиждень/місяць):</b>\n   {tokens_day:,} / {tokens_week:,} / {tokens_month:,}\n\n"
             f"🔍 <b>Воронка фільтрації:</b>\n▪️ Знайдено в RSS: {stats['funnel']['scraped_total']}\n▪️ По джерелах: {scraped_src_str}\n"
             f"▪️ Пропущено (старі/вже в історії): {stats['funnel']['already_seen']}\n▪️ Відсіяно фільтрами: {stats['funnel']['rejected_by_keywords']}\n"
@@ -156,102 +212,79 @@ def is_quality_article(title, description, url):
     
     return True
 
-@retry(stop=stop_after_attempt(4), wait=wait_exponential(multiplier=2, min=5, max=60))
-def call_gemini_json(client, prompt):
-    # Пріоритет: спочатку розумна, потім швидка
-    models_to_try = ['gemini-3.6-flash', 'gemini-3.5-flash-lite']
-    last_error = None
-    
-    for current_model in models_to_try:
-        try:
-            response = client.models.generate_content(
-                model=current_model, 
-                contents=prompt, 
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    response_schema=NewsFilterResponse, # <--- ДОДАНО ОСЬ ЦЕ
-                    temperature=0.0,
-                    safety_settings=[
-                        types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
-                        types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
-                        types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
-                        types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE"),
-                    ]
-                )
-            )
-            
-            # ЗАХИСТ: Перевірка на порожню відповідь
-            if not response or not getattr(response, 'text', None):
-                raise ValueError(f"Порожня відповідь (None) з моделі {current_model}")
-                
-            # Якщо успіх — одразу повертаємо результат
-            return response
-            
-        except Exception as e:
-            logging.warning(f"⚠️ Дедуплікація: Модель {current_model} недоступна ({e}). Перемикаємось...")
-            last_error = e
-            time.sleep(5)  # Коротка пауза перед запасною моделлю
-            
-    # Якщо обидві моделі впали, викликаємо фінальну помилку.
-    # Її підхопить @retry (tenacity) і відправить скрипт на тривалий сон (від 5 до 60 сек).
-    raise last_error
+SAFETY_OFF = [
+    types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
+    types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
+    types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
+    types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE"),
+]
 
-@retry(stop=stop_after_attempt(4), wait=wait_exponential(multiplier=2, min=15, max=60))
-def generate_news_texts(client, prompt, expected_count):
-    # Пріоритет для перекладу: спочатку швидка, потім розумна
-    models_to_try = ['gemini-3.5-flash-lite', 'gemini-3.6-flash']
-    last_error = None
-    
-    for current_model in models_to_try:
-        try:
-            response = client.models.generate_content(
-                model=current_model, 
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    temperature=0.0,
-                    safety_settings=[
-                        types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
-                        types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
-                        types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
-                        types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE"),
-                    ]
-                )
+# Повтори tenacity: лише для тимчасових збоїв. Якщо квоту вичерпано для всіх моделей —
+# одразу здаємося (повтори в цьому запуску не допоможуть і лише марнують час).
+@retry(stop=stop_after_attempt(4), wait=wait_exponential(multiplier=2, min=5, max=60),
+       retry=retry_if_not_exception_type(GeminiQuotaExhausted), reraise=True)
+def call_gemini_json(client, prompt):
+    # Фільтр/дедуплікація: потрібен лише JSON за схемою -> lite-моделі з великою квотою (FILTER_MODELS)
+    def call(model):
+        response = client.models.generate_content(
+            model=model,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=NewsFilterResponse,
+                temperature=0.0,
+                safety_settings=SAFETY_OFF
             )
-            
-            if not response or not getattr(response, 'text', None):
-                raise ValueError(f"Порожня відповідь від {current_model}")
-                
-            logging.info(f"Текст від Gemini ({current_model}):\n{response.text}")
-                
-            # --- ЖОРСТКЕ ВИДАЛЕННЯ ГАЛЮЦИНАЦІЙ ШІ ---
-            HOMOGLYPHS = {
-                'ά': 'а', 'α': 'а', 'ό': 'о', 'ο': 'о', 
-                'έ': 'е', 'ε': 'е', 'ί': 'і', 'ι': 'і', 
-                'ή': 'и', 'η': 'и', 'ν': 'н', 'Ν': 'Н',
-                'ב': 'б', 'ب': 'б',
-                'є́': 'є', 'і́': 'і'
-            }
-            
-            clean_text = response.text
-            clean_text = clean_text.replace('\u0301', '') # Видалення невидимого наголосу
-            
-            for bad_char, good_char in HOMOGLYPHS.items():
-                clean_text = clean_text.replace(bad_char, good_char)
-                
-            texts = [t.strip() for t in clean_text.strip().split('|||') if t.strip()]
-            
-            if len(texts) != expected_count: 
-                raise ValueError(f"Невірна кількість текстів від {current_model}: очікували {expected_count}, отримали {len(texts)}")
-                
-            return response, texts
-            
-        except Exception as e:
-            logging.warning(f"⚠️ Переклад: Модель {current_model} недоступна ({e}). Перемикаємось...")
-            last_error = e
-            time.sleep(5)
-            
-    # Якщо обидві моделі впали, віддаємо помилку декоратору @retry
-    raise last_error
+        )
+        # ЗАХИСТ: Перевірка на порожню відповідь
+        if not response or not getattr(response, 'text', None):
+            raise ValueError(f"Порожня відповідь (None) з моделі {model}")
+        return response
+
+    return run_model_cascade("filter", FILTER_MODELS, call)
+
+@retry(stop=stop_after_attempt(4), wait=wait_exponential(multiplier=2, min=15, max=60),
+       retry=retry_if_not_exception_type(GeminiQuotaExhausted), reraise=True)
+def generate_news_texts(client, prompt, expected_count):
+    # Переклад: лише flash-моделі (TRANSLATE_MODELS); lite-моделі погано тримають інструкції
+    def call(model):
+        response = client.models.generate_content(
+            model=model,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                temperature=0.0,
+                safety_settings=SAFETY_OFF
+            )
+        )
+
+        if not response or not getattr(response, 'text', None):
+            raise ValueError(f"Порожня відповідь від {model}")
+
+        logging.info(f"Текст від Gemini ({model}):\n{response.text}")
+
+        # --- ЖОРСТКЕ ВИДАЛЕННЯ ГАЛЮЦИНАЦІЙ ШІ ---
+        HOMOGLYPHS = {
+            'ά': 'а', 'α': 'а', 'ό': 'о', 'ο': 'о',
+            'έ': 'е', 'ε': 'е', 'ί': 'і', 'ι': 'і',
+            'ή': 'и', 'η': 'и', 'ν': 'н', 'Ν': 'Н',
+            'ב': 'б', 'ب': 'б',
+            'є́': 'є', 'і́': 'і'
+        }
+
+        clean_text = response.text
+        clean_text = clean_text.replace('\u0301', '') # Видалення невидимого наголосу
+
+        for bad_char, good_char in HOMOGLYPHS.items():
+            clean_text = clean_text.replace(bad_char, good_char)
+
+        texts = [t.strip() for t in clean_text.strip().split('|||') if t.strip()]
+
+        if len(texts) != expected_count:
+            raise ValueError(f"Невірна кількість текстів від {model}: очікували {expected_count}, отримали {len(texts)}")
+
+        return response, texts
+
+    return run_model_cascade("translate", TRANSLATE_MODELS, call)
 
 @retry(stop=stop_after_attempt(4), wait=wait_exponential(multiplier=2, min=3, max=30), reraise=True)
 def execute_telegram_request(api_url, payload):
@@ -803,6 +836,8 @@ def main():
         exit(1)
         
     start_time = time.time()
+    logging.info(f"🤖 Моделі фільтра: {', '.join(FILTER_MODELS)}")
+    logging.info(f"🤖 Моделі перекладу: {', '.join(TRANSLATE_MODELS)}")
     # ... далі йде словник stats ...
     stats = {
         "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'), 
@@ -825,6 +860,7 @@ def main():
                           data={'chat_id': ADMIN_CHAT_ID, 'text': f"⚠️ ALARM: Скрипт впав з помилкою: {e}"})
     finally:
         stats["execution_time"] = round(time.time() - start_time, 1)
+        stats["gemini_retries"] = MODEL_USAGE["failed_attempts"]
         
         try:
             conn = get_db_connection()

@@ -28,6 +28,9 @@ jobs:
         GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         ADMIN_CHAT_ID: ${{ secrets.ADMIN_CHAT_ID }}
         DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        # Необов'язково: списки моделей через кому (Settings -> Variables). Порожньо = значення з main.py
+        GEMINI_FILTER_MODELS: ${{ vars.GEMINI_FILTER_MODELS }}
+        GEMINI_TRANSLATE_MODELS: ${{ vars.GEMINI_TRANSLATE_MODELS }}
       run: |
         python setup_db.py
         python main.py
