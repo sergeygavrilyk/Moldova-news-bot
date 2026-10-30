@@ -1,0 +1,28 @@
+name: Check Gemini filter
+
+# Smoke-тест фільтра: 1 реальний запит до моделі фільтра на тестових новинах.
+# Нічого не публікує і не пише в БД. Запускається вручну або при зміні main.py у гілці (не в main).
+on:
+  workflow_dispatch:
+  push:
+    branches-ignore: [main]
+    paths:
+      - 'main.py'
+      - 'tools/check_filter.py'
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      - run: pip install -r requirements.txt
+      - name: Check filter
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_FILTER_MODELS: ${{ vars.GEMINI_FILTER_MODELS }}
+        run: python tools/check_filter.py

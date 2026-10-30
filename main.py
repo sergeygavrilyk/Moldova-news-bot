@@ -16,12 +16,18 @@ from google import genai
 from google.genai import types  # ДОДАНО ДЛЯ SAFETY SETTINGS
 import cloudscraper
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_not_exception_type, retry_if_exception_type
+from typing import Literal
 from pydantic import BaseModel, Field
+
+# D-04: фіксований перелік причин відхилення (відповідає крокам промпту фільтра)
+REJECTION_CATEGORIES = ("Дублікат", "Вже публікувалось", "Спорт", "Реклама", "Світовий шум", "Не за тематикою")
+NO_REASON = "Без причини"  # модель не повернула новину ні в keep, ні в rejected
 
 class RejectedItem(BaseModel):
     id: int
     entities_found: list[str] = Field(description="3-5 ключових фігурантів, компаній, цифр або локацій")
-    reason: str
+    reason: Literal["Дублікат", "Вже публікувалось", "Спорт", "Реклама", "Світовий шум", "Не за тематикою"]
+    detail: str = Field(description="коротке пояснення українською, до 12 слів")
 
 class NewsFilterResponse(BaseModel):
     keep: list[int]
@@ -139,7 +145,8 @@ def send_analytics_to_admin(stats):
             f"🪙 <b>Токени (сьогодні/тиждень/місяць):</b>\n   {tokens_day:,} / {tokens_week:,} / {tokens_month:,}\n\n"
             f"🔍 <b>Воронка фільтрації:</b>\n▪️ Знайдено в RSS: {stats['funnel']['scraped_total']}\n▪️ По джерелах: {scraped_src_str}\n"
             f"▪️ Пропущено (старі/вже в історії): {stats['funnel']['already_seen']}\n▪️ Відсіяно фільтрами: {stats['funnel']['rejected_by_keywords']}\n"
-            f"▪️ Відсіяно Gemini (дублі/історія): {stats['funnel']['duplicates_removed_by_ai']}\n\n"
+            f"▪️ Відсіяно Gemini: {stats['funnel']['duplicates_removed_by_ai']}"
+            f"{(' — ' + ', '.join(f'{k} {v}' for k, v in sorted(stats['funnel'].get('rejected_reasons', {}).items(), key=lambda kv: -kv[1]))) if stats['funnel'].get('rejected_reasons') else ''}\n\n"
             f"📥 <b>Беклог (очікують ШІ-валідації: {stats['backlog']['total_size']}):</b>\n▪️ {backlog_src_str}\n\n"
             f"✅ <b>Опубліковано: {stats['published']['total']}</b>\n"
             f"▪️ Формат: З фото ({stats['published']['with_images']}; фото знайдено на сторінках статей: {stats['published'].get('og_images_found', 0)}) | Текст ({stats['published']['text_only']})\n"
@@ -436,6 +443,24 @@ def execute_telegram_request(api_url, payload):
         raise TelegramRetryableError(f"Telegram {resp.status_code}: {resp.text[:200]}")
     raise Exception(f"Telegram Error {resp.status_code}: {resp.text[:300]}")
 
+def normalize_reason(raw):
+    """Зводить будь-яку причину від моделі до однієї з REJECTION_CATEGORIES (D-04).
+    Страховка на випадок, якщо модель відповість не за переліком."""
+    if raw in REJECTION_CATEGORIES:
+        return raw
+    text = (raw or '').lower()
+    if any(k in text for k in ('істор', 'вже ', 'висвітлюва', 'згадува', 'публікува')):
+        return "Вже публікувалось"
+    if 'дубл' in text:
+        return "Дублікат"
+    if 'спорт' in text:
+        return "Спорт"
+    if 'реклам' in text or 'промо' in text:
+        return "Реклама"
+    if any(k in text for k in ('шум', 'лайфстайл', 'світськ', 'третіх країн')):
+        return "Світовий шум"
+    return "Не за тематикою" if text.strip() else NO_REASON
+
 def deduplicate_news(client, articles, recent_history=None, stats=None):
     if not articles: return articles, {}
     logging.info("Аналіз на дублікати та збір причин відхилення через Gemini...")
@@ -488,7 +513,12 @@ def deduplicate_news(client, articles, recent_history=None, stats=None):
     2. "rejected": масив об'єктів для всіх інших відхилених новин, де кожен об'єкт містить: 
        - "id": номер новини,
        - "entities_found": масив з 3-5 ключових сутностей (назви компаній, суми, імена, точні локації),
-       - "reason": коротка причина відхилення українською (наприклад: "Спорт", "Дублікат", "Світовий шум").
+       - "reason": ОДНА категорія СУВОРО з переліку (дослівно):
+           "Дублікат" — та сама коренева подія, що й в іншого кандидата (КРОК 2);
+           "Вже публікувалось" — коренева подія вже є в <HISTORY> (КРОК 3);
+           "Спорт", "Реклама", "Світовий шум" — стоп-теми (КРОК 4; «Світовий шум» включає лайфстайл і події в третіх країнах);
+           "Не за тематикою" — не належить до жодної з чотирьох категорій КРОКУ 5 (дрібна місцева подія, анонс тощо),
+       - "detail": коротке пояснення українською, до 12 слів.
     3. "updates": масив ID з "keep", які є кардинальною розв'язкою події, що вже є в <HISTORY> (наприклад, [2]). Якщо таких немає — порожній масив [].
        
     Більше ніякого тексту, тільки чистий JSON.
@@ -524,8 +554,12 @@ def deduplicate_news(client, articles, recent_history=None, stats=None):
         # Зберігаємо відхилені товари у вигляді словника {index: reason} для подальшого запису в БД
         reasons_map = {}
         for item in rejected_items:
-            if isinstance(item, dict) and 'id' in item:
-                reasons_map[int(item['id'])] = item.get('reason', 'Не вказано')
+            if isinstance(item, dict) and str(item.get('id', '')).isdigit():
+                idx = int(item['id'])
+                category = normalize_reason(item.get('reason'))
+                reasons_map[idx] = category
+                if idx < len(articles):
+                    logging.info(f"   ✖ [{idx}] {category}: {item.get('detail', '')} | {articles[idx]['title'][:70]}")
                 
         removed_count = len(articles) - len(filtered_articles)
         if removed_count > 0: 
@@ -810,7 +844,9 @@ def process_backlog(stats):
         for idx, item in enumerate(evaluated_guids.values()):
             guid = item['guid']
             if guid not in approved_guids:
-                reason = reasons_map.get(idx, 'ШІ фільтр (дублікат/спам)')
+                reason = reasons_map.get(idx, NO_REASON)
+                stats["funnel"].setdefault("rejected_reasons", {})
+                stats["funnel"]["rejected_reasons"][reason] = stats["funnel"]["rejected_reasons"].get(reason, 0) + 1
                 cursor.execute(
                     "UPDATE articles SET status = 'rejected', rejection_reason = %s WHERE guid = %s",
                     (reason, guid)
