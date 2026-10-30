@@ -46,15 +46,18 @@ DATABASE_URL = os.getenv('DATABASE_URL')
 
 MAX_AGE_SECONDS = 43200 # 12 годин
 BATCH_SIZE = 3
-client = genai.Client(api_key=GEMINI_API_KEY)
+# Таймаут 180 с на запит: модель, що «зависла», не блокує запуск — каскад перейде до наступної
+client = genai.Client(api_key=GEMINI_API_KEY, http_options=types.HttpOptions(timeout=180_000))
 
 # --- МОДЕЛІ GEMINI (каскад: перша доступна модель зі списку) ---
 # На безкоштовному тарифі у кожної моделі своя денна квота
 # (flash-моделі ~20 запитів/добу, lite-моделі ~500), тому використовуємо їх по черзі.
 # Змінити без правки коду: GitHub -> Settings -> Secrets and variables -> Actions -> Variables
 # (GEMINI_FILTER_MODELS / GEMINI_TRANSLATE_MODELS, назви через кому).
-DEFAULT_FILTER_MODELS = "gemini-3.5-flash-lite,gemini-3.1-flash-lite,gemini-2.5-flash-lite"
-DEFAULT_TRANSLATE_MODELS = "gemini-3.8-flash,gemini-3.7-flash,gemini-3.6-flash,gemini-3.5-flash,gemini-2.5-flash,gemini-3-flash-preview"
+# Перевірено 30.10.2026 (workflow "Check Gemini models"): gemini-2.5-flash / 2.5-flash-lite — 404 для нових ключів,
+# gemini-3.7-flash — таймаут, gemini-3.8-flash — періодично 503 (перевантаження).
+DEFAULT_FILTER_MODELS = "gemini-3.5-flash-lite,gemini-3.1-flash-lite"
+DEFAULT_TRANSLATE_MODELS = "gemini-3.8-flash,gemini-3.6-flash,gemini-3.5-flash-lite"
 
 def parse_models(env_name, default):
     raw = os.getenv(env_name) or default
@@ -246,7 +249,7 @@ def call_gemini_json(client, prompt):
 @retry(stop=stop_after_attempt(4), wait=wait_exponential(multiplier=2, min=15, max=60),
        retry=retry_if_not_exception_type(GeminiQuotaExhausted), reraise=True)
 def generate_news_texts(client, prompt, expected_count):
-    # Переклад: лише flash-моделі (TRANSLATE_MODELS); lite-моделі погано тримають інструкції
+    # Переклад: flash-моделі, lite — лише останній резерв (TRANSLATE_MODELS)
     def call(model):
         response = client.models.generate_content(
             model=model,
