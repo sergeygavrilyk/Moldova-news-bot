@@ -7,8 +7,8 @@ feeds = [
     "category": "Регіональні"
   },
   {
-    "name": "IPN",
-    "url": "https://ipn.md/en/rss",
+    "name": "Radio Moldova",
+    "url": "https://radiomoldova.md/rss",
     "category": "Регіональні"
   },
 {

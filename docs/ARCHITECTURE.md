@@ -13,7 +13,7 @@
              ┌──────────────────────────────┬──────────────────────────────┬───────┴────────────┐
              ▼                              ▼                              ▼                    ▼
    RSS 4 джерел (cloudscraper)   Google Gemini API               Supabase Postgres      Telegram Bot API
-   newsmaker.md, ipn.md,          • gemini-embedding-001          • sources               • канал (новини)
+   newsmaker.md, radiomoldova.md, • gemini-embedding-001          • sources               • канал (новини)
    moldovalive.md, point.md       • gemini-3.6-flash              • articles (+pgvector)  • ADMIN_CHAT_ID
                                   • gemini-3.5-flash-lite         • run_analytics           (звіти, алерти)
 ```

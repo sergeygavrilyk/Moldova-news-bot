@@ -1,6 +1,6 @@
 [
   {"name": "Newsmaker", "url": "https://newsmaker.md/feed/", "note": "поточне джерело"},
-  {"name": "IPN (en)", "url": "https://ipn.md/en/rss", "note": "поточне джерело — кандидат на заміну"},
+  {"name": "IPN (en)", "url": "https://ipn.md/en/rss", "note": "вимкнено 30.10 (замінено на Radio Moldova)"},
   {"name": "Moldovalive", "url": "https://moldovalive.md/feed/", "note": "поточне джерело"},
   {"name": "Point MD", "url": "https://point.md/ru/rss/novosti/", "note": "поточне джерело"},
 
@@ -16,7 +16,7 @@
   {"name": "Stiri.md", "url": "https://stiri.md/rss", "note": "агрегатор, румунська"},
   {"name": "Deschide.md", "url": "https://deschide.md/ro/rss", "note": "румунська"},
   {"name": "Moldova 1", "url": "https://moldova1.md/rss", "note": "суспільне ТБ"},
-  {"name": "Radio Moldova", "url": "https://radiomoldova.md/rss", "note": "суспільне радіо"},
+  {"name": "Radio Moldova", "url": "https://radiomoldova.md/rss", "note": "поточне джерело з 30.10 (замість IPN)"},
   {"name": "Logos-Press (ru)", "url": "https://logos-pres.md/feed/", "note": "економіка, російська"},
   {"name": "Noi.md (ru)", "url": "https://noi.md/ru/rss", "note": "російська"},
   {"name": "Infotag (ru)", "url": "https://www.infotag.md/rss/", "note": "інформагентство, російська"},

@@ -14,7 +14,8 @@ cron-job.org ──(HTTP POST, ~щогодини вдень)──▶ GitHub Act
                                                  ├─ python setup_db.py   (CREATE TABLE IF NOT EXISTS + джерела з feeds.json)
                                                  └─ python main.py
                                                       │
-   RSS: Newsmaker · IPN · Moldovalive · Point MD ─────┤ 1. scrape_feeds()   → нові статті в Supabase (status = pending)
+   RSS: Newsmaker · Radio Moldova ·                   │
+        Moldovalive · Point MD ───────────────────────┤ 1. scrape_feeds()   → нові статті в Supabase (status = pending)
                                                       │    фільтр віку 12 год, стоп-слова, вектор-дублікати (pgvector > 0.90)
    Google Gemini (AI Studio) ◀────────────────────────┤ 2. process_backlog() → до 40 кандидатів → Gemini-редактор (JSON)
                                                       │    → 3 найкращі → переклад українською → Telegram
