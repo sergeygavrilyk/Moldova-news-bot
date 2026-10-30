@@ -71,6 +71,24 @@ CREATE TABLE IF NOT EXISTS run_analytics (
 );
 
 -- ---------------------------------------------------------------------
+-- Статистика викликів моделей Gemini (T-22, з 30.10.2026): рядок на кожну спробу.
+--   task:    filter | translate
+--   outcome: ok | quota (429) | unavailable (5xx/перевантаження) | timeout |
+--            bad_response (порожня / неправильна кількість текстів) | error
+-- Тестові запуски (DRY_RUN) сюди не пишуть. Рядки старші за 90 днів видаляються.
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS model_calls (
+    id          SERIAL PRIMARY KEY,
+    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,   -- UTC
+    task        VARCHAR(20),
+    model       VARCHAR(64),
+    outcome     VARCHAR(20),
+    http_code   INTEGER,
+    latency_ms  INTEGER,
+    error       TEXT                                    -- перші 300 символів помилки
+);
+
+-- ---------------------------------------------------------------------
 -- RLS увімкнено на всіх трьох таблицях без жодної політики:
 -- через публічний REST API (anon/authenticated ключі) даних не видно.
 -- Бот ходить напряму через DATABASE_URL (роль postgres) і RLS обходить.
@@ -78,6 +96,7 @@ CREATE TABLE IF NOT EXISTS run_analytics (
 ALTER TABLE sources       ENABLE ROW LEVEL SECURITY;
 ALTER TABLE articles      ENABLE ROW LEVEL SECURITY;
 ALTER TABLE run_analytics ENABLE ROW LEVEL SECURITY;
+ALTER TABLE model_calls   ENABLE ROW LEVEL SECURITY;
 
 -- ---------------------------------------------------------------------
 -- Рекомендовані індекси (ЗАРАЗ ВІДСУТНІ; при ~3 тис. рядків не критично).

@@ -124,6 +124,8 @@ pending ──▶ processing ──▶ sent
 усі статуси ──▶ видалення через 30 днів
 ```
 
+Таблиця `model_calls` (з 30.10.2026): по рядку на кожну спробу виклику моделі Gemini (`task`, `model`, `outcome`, `http_code`, `latency_ms`, `error`); пишеться наприкінці запуску, зберігається 90 днів; у DRY_RUN не пишеться.
+
 Час у БД — UTC (`timestamp without time zone`, значення за замовчуванням сервера Supabase).
 
 ## 5. Ключові константи
