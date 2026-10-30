@@ -33,7 +33,8 @@ CREATE TABLE IF NOT EXISTS sources (
 --   sent       -> опубліковано в канал
 --   failed     -> Telegram не прийняв повідомлення
 --   rejected   -> відхилено Gemini (причина в rejection_reason)
---   expired    -> пролежало в pending понад 12 годин
+--   expired    -> новині понад 12 годин від публікації на сайті
+--                 (COALESCE(published_at, created_at), з 30.10.2026 — D-14)
 -- Статті старші за 30 днів видаляються наприкінці кожного запуску.
 -- ---------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS articles (
@@ -46,11 +47,13 @@ CREATE TABLE IF NOT EXISTS articles (
     status            VARCHAR(50) DEFAULT 'pending',
     created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,  -- час UTC
     rejection_reason  TEXT,
-    embedding         vector                          -- gemini-embedding-001, 3072 виміри
+    embedding         vector,                         -- gemini-embedding-001, 3072 виміри
+    published_at      TIMESTAMP                       -- час публікації на сайті (UTC), з RSS; NULL — дати немає (D-14)
 );
 
 ALTER TABLE articles ADD COLUMN IF NOT EXISTS rejection_reason TEXT;
 ALTER TABLE articles ADD COLUMN IF NOT EXISTS embedding vector;
+ALTER TABLE articles ADD COLUMN IF NOT EXISTS published_at TIMESTAMP;
 
 -- ---------------------------------------------------------------------
 -- Аналітика запусків (по рядку на кожен запуск main.py).
