@@ -13,7 +13,7 @@ import psycopg2
 from urllib.parse import urlparse, urljoin
 from dotenv import load_dotenv
 from google import genai
-from google.genai import types  # ДОДАНО ДЛЯ SAFETY SETTINGS
+from google.genai import types
 import cloudscraper
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_not_exception_type, retry_if_exception_type
 from typing import Literal
@@ -560,7 +560,7 @@ def deduplicate_news(client, articles, recent_history=None, stats=None):
     
     history = recent_history[-75:] if recent_history else []
     prompt_data = [{"id": i, "title": a["title"], "description": a.get("description", "")} for i, a in enumerate(articles)]
-# ДОДАНО ЛОГУВАННЯ ЗАГОЛОВКІВ ("Прожектор")
+    # Список кандидатів у лог — щоб бачити, що саме отримав фільтр
     titles_log = "\n".join([f"[{i}] {a['title']}" for i, a in enumerate(articles)])
     logging.info(f"📋 Кандидати на фільтрацію (Молдова):\n{titles_log}")
     
@@ -668,13 +668,17 @@ def deduplicate_news(client, articles, recent_history=None, stats=None):
             stats["errors_count"] += 1
         return None, {}
 
+# Ключові слова «українських» новин (румунською й російською) — для пріоритету в черзі та статистики
+UKRAINE_KEYWORDS = [r'\bucrain', r'\bzelenski', r'\bkiev', r'\bkiiv', r'\bodesa', r'\bodessa', r'\brefugiat', r'\bprotectie temporara', r'\bprotecție temporară', r'\bprivremen\w*\s+protectie', r'\bукраин', r'\bзеленск', r'\bкиев', r'\bодесс', r'\bбеженц']
+
+def is_ukraine_related(item):
+    text = (item.get('title', '') + " " + item.get('description', '')).lower()
+    return any(re.search(kw, text) for kw in UKRAINE_KEYWORDS)
+
 def prioritize_ukraine_news(backlog_items):
-    ukraine_keywords = [r'\bucrain', r'\bzelenski', r'\bkiev', r'\bkiiv', r'\bodesa', r'\bodessa', r'\brefugiat', r'\bprotectie temporara', r'\bprotecție temporară', r'\bprivremen\w*\s+protectie', r'\bукраин', r'\bзеленск', r'\bкиев', r'\bодесс', r'\bбеженц']
-    ukraine_news = []
-    other_news = []
-    for item in backlog_items:
-        if any(re.search(kw, (item.get('title', '') + " " + item.get('description', '')).lower()) for kw in ukraine_keywords): ukraine_news.append(item)
-        else: other_news.append(item)
+    """Українські новини — на початок черги, порядок усередині груп зберігається."""
+    ukraine_news = [item for item in backlog_items if is_ukraine_related(item)]
+    other_news = [item for item in backlog_items if not is_ukraine_related(item)]
     return ukraine_news + other_news
 
 def scrape_feeds(stats):
@@ -745,24 +749,24 @@ def scrape_feeds(stats):
                 stats["funnel"]["rejected_by_keywords"] += 1
                 continue
 
-            # --- 1. ГЕНЕРАЦИЯ ВЕКТОРА (EMBEDDING) ---
+            # --- 1. ВЕКТОР (EMBEDDING) ДЛЯ СЕМАНТИЧНОГО ПОШУКУ ДУБЛІВ ---
             try:
                 embed_response = client.models.embed_content(
                     model="gemini-embedding-001",
                     contents=f"{title}. {description}"
                 )
                 vector = embed_response.embeddings[0].values
-                # Форматируем список в строку вектора для PostgreSQL: "[0.1, 0.2, ...]"
+                # Вектор як рядок для PostgreSQL: "[0.1, 0.2, ...]"
                 vector_str = f"[{','.join(map(str, vector))}]"
             except Exception as e:
-                logging.error(f"Ошибка генерации вектора для {url}: {e}")
+                logging.error(f"Помилка генерації вектора для {url}: {e}")
                 vector_str = None
 
-            # --- 2. ПРОВЕРКА НА СЕМАНТИЧЕСКИЙ ДУБЛИКАТ В БД (> 90%) ---
+            # --- 2. ПЕРЕВІРКА НА СМИСЛОВИЙ ДУБЛЬ У БД (схожість > 90%) ---
             is_semantic_duplicate = False
             if vector_str:
                 try:
-                    # Ищем косинусное сходство (1 - distance). 
+                    # Косинусна схожість = 1 - відстань
                     cursor.execute("""
                         SELECT title, 1 - (embedding <=> %s::vector) AS similarity 
                         FROM articles 
@@ -773,18 +777,18 @@ def scrape_feeds(stats):
                     """, (vector_str, vector_str))
                     
                     match = cursor.fetchone()
-                    if match and match[1] > 0.90:  # Порог 90% сходства
-                        logging.info(f"🛑 Векторный фильтр отсек дубликат (Сходство {match[1]:.2f}): {title[:40]}... -> Похоже на: {match[0][:40]}...")
+                    if match and match[1] > 0.90:  # поріг схожості 90%
+                        logging.info(f"🛑 Векторний фільтр відсіяв дубль (схожість {match[1]:.2f}): {title[:40]}... -> схоже на: {match[0][:40]}...")
                         is_semantic_duplicate = True
                 except Exception as e:
-                    logging.error(f"Ошибка векторного поиска: {e}")
-                    conn.rollback() # Сброс транзакции при ошибке, чтобы скрипт не упал
+                    logging.error(f"Помилка векторного пошуку: {e}")
+                    conn.rollback()  # скидаємо транзакцію, інакше наступні запити не виконаються
 
             if is_semantic_duplicate:
                 stats["funnel"]["already_seen"] += 1
                 continue
 
-            # --- 3. ЗАПИСЬ НОВОЙ СТАТЬИ И ЕЕ ВЕКТОРА ---
+            # --- 3. ЗАПИС НОВОЇ СТАТТІ ТА ЇЇ ВЕКТОРА ---
             images = extract_image_urls(entry)
             try:
                 cursor.execute('''
@@ -796,7 +800,7 @@ def scrape_feeds(stats):
                 # більше не скасовує все, що вже зібрано в цьому запуску (AUDIT A3 / T-05)
                 conn.commit()
             except Exception as e:
-                logging.error(f"Ошибка записи в БД: {e}")
+                logging.error(f"Помилка запису в БД: {e}")
                 conn.rollback()
 
             if DRY_RUN:  # у БД нічого не записано — передаємо статтю у відбір напряму
@@ -818,7 +822,7 @@ def process_backlog(stats):
     conn = get_db_connection()
     cursor = conn.cursor()
     
-    # --- ДОДАНО: Відновлення завислих у статусі 'processing' ---
+    # --- Відновлення статей, що зависли в статусі 'processing' ---
     try:
         cursor.execute("""
             UPDATE articles 
@@ -831,7 +835,7 @@ def process_backlog(stats):
         logging.error(f"Помилка відновлення завислих processing: {db_err}")
     # ----------------------------------------------------------
 
-    # --- ДОДАНО: Автоматичне очищення старого беклогу ---
+    # --- Автоматичне очищення старого беклогу ---
     try:
         # D-14: вік рахуємо від публікації на сайті (якщо відома), а не від моменту збору
         cursor.execute(
@@ -851,7 +855,6 @@ def process_backlog(stats):
         WHERE a.status = 'pending' ORDER BY COALESCE(a.published_at, a.created_at) DESC
     """)
     rows = cursor.fetchall()
-    # ... далі код залишається без змін ...
     backlog = []
     for r in rows:
         backlog.append({
@@ -874,7 +877,6 @@ def process_backlog(stats):
         conn.close()
         return
 
-    ukraine_keywords = [r'\bucrain', r'\bzelenski', r'\bkiev', r'\bkiiv', r'\bodesa', r'\bodessa', r'\brefugiat', r'\bprotectie temporara', r'\bprotecție temporară', r'\bprivremen\w*\s+protectie', r'\bукраин', r'\bзеленск', r'\bкиев', r'\bодесс', r'\bбеженц']
     backlog.sort(key=lambda x: x.get('timestamp', 0), reverse=True)
       
     all_sources = list(dict.fromkeys(item['source'] for item in backlog))
@@ -894,8 +896,7 @@ def process_backlog(stats):
     # перевіряємо їх і робимо ранній вихід (break), коли вони закінчуються.
     sorted_backlog = prioritize_ukraine_news(backlog)
     for item in sorted_backlog:
-        text_context = (item.get('title', '') + " " + item.get('description', '')).lower()
-        if any(re.search(kw, text_context) for kw in ukraine_keywords):
+        if is_ukraine_related(item):
             if item['url'] not in used_urls:
                 candidate_batch.append(item)
                 used_urls.add(item['url'])
@@ -941,12 +942,8 @@ def process_backlog(stats):
 
     if DRY_RUN:
         send_dry_run_filter_report(list(evaluated_guids.values()), approved_guids, reasons_map, candidate_batch)
-    
-    for idx, item in enumerate(candidate_batch):
-        # Якщо стаття не увійшла в approved, вона відхилена
-        pass
-        
-    # Проходимо по всіх кандидатах і оновлюємо статус в БД
+
+    # Кандидати, яких немає серед схвалених, — відхилені: статус rejected і причина в БД
     try:
         for idx, item in enumerate(evaluated_guids.values()):
             guid = item['guid']
@@ -969,7 +966,6 @@ def process_backlog(stats):
         conn.close()
         return
       
-    # ДОДАЙТЕ ЦІ ДВА РЯДКИ:
     used_sources_log = list(dict.fromkeys(item.get('source') for item in batch))
     logging.info(f"🔄 Обрано {len(batch)} новин. Фактичні джерела: {', '.join(used_sources_log)}")
       
@@ -1050,7 +1046,7 @@ def process_backlog(stats):
         logging.error(f"❌ Помилка Gemini під час перекладу: {e}")
         stats["errors_count"] += 1 
         
-        # --- ДОДАНО: Повертаємо завислі статті назад у чергу ---
+        # --- Повертаємо статті партії назад у чергу ---
         try:
             cursor.execute("UPDATE articles SET status = 'pending' WHERE guid = ANY(%s)", (batch_guids,))
             conn.commit()
@@ -1066,16 +1062,14 @@ def process_backlog(stats):
     for idx, item in enumerate(batch):
         if idx >= len(generated_texts): break 
         
-        # Видалили виклик функції, передаємо порожні tags
         images = item.get('image_urls', [])
-          
         post_text = apply_update_prefix(generated_texts[idx], item.get('is_update', False))
-        if send_to_telegram(post_text, item['url'], item.get('source', 'Джерело'), images, tags=""):
+        if send_to_telegram(post_text, item['url'], item.get('source', 'Джерело'), images):
             try:
                 cursor.execute("UPDATE articles SET status = 'sent' WHERE guid = %s", (item['guid'],))
                 conn.commit()
                 stats["published"]["total"] += 1
-                if any(re.search(kw, (item.get('title', '') + " " + item.get('description', '')).lower()) for kw in ukraine_keywords): 
+                if is_ukraine_related(item):
                     stats["published"]["ukraine_priority"] += 1
                 if images: stats["published"]["with_images"] += 1
                 else: stats["published"]["text_only"] += 1
@@ -1167,15 +1161,13 @@ def visible_len(html_text):
     """Довжина тексту так, як її рахує Telegram (без HTML-тегів, сутності — один символ)."""
     return len(html_lib.unescape(re.sub(r'<[^>]+>', '', html_text or '')))
 
-def send_to_telegram(text, url, source_name, image_urls=None, tags=""):
-   
-    
-    # 2. ХЕШТЕГИ В КІНЦІ ТЕКСТУ (D-22): беремо лише самі хештеги, а не весь останній абзац —
+def send_to_telegram(text, url, source_name, image_urls=None):
+    # 1. ХЕШТЕГИ В КІНЦІ ТЕКСТУ (D-22): беремо лише самі хештеги, а не весь останній абзац —
     # модель інколи ставить їх з нового рядка без порожнього рядка, і тоді «абзацом» ставав увесь текст
     text, hashtags = split_trailing_hashtags(text)
     extracted_tags = f"\n\n{hashtags}" if hashtags else ""
 
-    # Обробка списку зображень (з Молдовського)
+    # Список зображень: None/рядок -> список
     if not image_urls: image_urls = []
     elif isinstance(image_urls, str): image_urls = [image_urls]
     
@@ -1188,10 +1180,10 @@ def send_to_telegram(text, url, source_name, image_urls=None, tags=""):
     # D-19: URL і назва джерела — з екрануванням
     safe_url = html_lib.escape(url or '', quote=True)
     safe_source = html_lib.escape(source_name or 'Джерело', quote=False)
-    footer = f"{extracted_tags}{tags}\n\n🔗 Джерело: <a href=\"{safe_url}\">{safe_source}</a>"
+    footer = f"{extracted_tags}\n\n🔗 Джерело: <a href=\"{safe_url}\">{safe_source}</a>"
     header = DRY_RUN_HEADER if DRY_RUN else ""
 
-    # 3. ЛІМІТ ТЕКСТУ (D-22): Telegram рахує видимі символи — підпис до фото ≤ 1024, повідомлення ≤ 4096.
+    # 2. ЛІМІТ ТЕКСТУ (D-22): Telegram рахує видимі символи — підпис до фото ≤ 1024, повідомлення ≤ 4096.
     # Бюджет тексту = ліміт (із запасом) − шапка − хештеги − «Джерело»; не менше 300 символів.
     total_limit = 1000 if image_urls else 4000
     budget = max(total_limit - visible_len(header) - visible_len(footer), 300)
@@ -1207,7 +1199,7 @@ def send_to_telegram(text, url, source_name, image_urls=None, tags=""):
 
     payload = {'chat_id': target_chat_id()}
     
-    # Структура відправки (з Молдовського)
+    # 3. ФОРМАТ: текст | одне фото з підписом | альбом (підпис — до першого фото)
     if len(image_urls) == 0:
         payload['parse_mode'] = 'HTML'
         payload['text'] = full_message
@@ -1257,7 +1249,6 @@ def main():
         logging.warning("🧪 DRY_RUN: тестовий запуск — БД лише на читання, пости йдуть в адмін-чат, а не в канал")
     logging.info(f"🤖 Моделі фільтра: {', '.join(FILTER_MODELS)}")
     logging.info(f"🤖 Моделі перекладу: {', '.join(TRANSLATE_MODELS)}")
-    # ... далі йде словник stats ...
     stats = {
         "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'), 
         "execution_time": 0, 
