@@ -247,9 +247,13 @@ def send_analytics_to_admin(stats):
             f"▪️ Формат: З фото ({stats['published']['with_images']}; фото знайдено на сторінках статей: {stats['published'].get('og_images_found', 0)}) | Текст ({stats['published']['text_only']})\n"
             f"▪️ Пріоритет 🇺🇦: {stats['published']['ukraine_priority']}\n▪️ Джерела: {pub_src_str}"
         )
-        
-        requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", 
-                      data={'chat_id': ADMIN_CHAT_ID, 'text': message, 'parse_mode': 'HTML'})
+        details = rejection_details_block(stats['funnel'].get('rejected_details', []))
+        if details:
+            message += "\n\n" + details
+
+        # Telegram приймає до 4096 символів: довгий звіт ділимо по рядках на кілька повідомлень
+        for chunk in split_message_lines(message):
+            send_admin_html(chunk)
     except Exception as e:
         logging.error(f"Помилка відправки статистики в Telegram: {e}")
 
@@ -258,6 +262,38 @@ def send_analytics_to_admin(stats):
 # Статус 'disabled' (вимкнено вручну) бот не чіпає.
 SOURCE_ERROR_LIMIT = 3
 SOURCE_RETRY_HOURS = 6
+
+def rejection_details_block(details):
+    """Звіт адміну: кожна відхилена новина — заголовок → категорія (пояснення моделі) | сутності."""
+    if not details:
+        return ""
+    esc = lambda v: html_lib.escape(str(v or ''), quote=False)
+    lines = ["❌ <b>Причини відхилення:</b>"]
+    for d in details:
+        line = f"• {esc(_short(d.get('title'), 70))} → {esc(d.get('reason'))}"
+        if d.get('detail'):
+            line += f" ({esc(_short(d['detail'], 120))})"
+        if d.get('entities'):
+            line += f" | Сутності: {esc(_short(', '.join(d['entities'][:5]), 120))}"
+        lines.append(line)
+    return "\n".join(lines)
+
+def split_message_lines(text, limit=4000):
+    """Ділить текст на частини ≤ limit символів по межах рядків (теги не розриваються, якщо кожен рядок їх закриває)."""
+    chunks, current = [], ""
+    for line in text.split("\n"):
+        while len(line) > limit:  # надто довгий рядок — ріжемо як є
+            if current:
+                chunks.append(current); current = ""
+            chunks.append(line[:limit]); line = line[limit:]
+        candidate = f"{current}\n{line}" if current else line
+        if len(candidate) > limit:
+            chunks.append(current); current = line
+        else:
+            current = candidate
+    if current.strip():
+        chunks.append(current)
+    return chunks
 
 def get_active_sources():
     """Джерела для опитування: усі 'ok' + 'error', з останньої спроби яких минуло SOURCE_RETRY_HOURS год."""
@@ -680,6 +716,10 @@ def deduplicate_news(client, articles, recent_history=None, stats=None):
                 category = normalize_reason(item.get('reason'))
                 reasons_map[idx] = category
                 if idx < len(articles):
+                    # пояснення моделі — для звіту адміну «❌ Причини відхилення» (у БД пишеться лише категорія)
+                    entities = item.get('entities_found') or []
+                    articles[idx]['reject_detail'] = str(item.get('detail') or '').strip()
+                    articles[idx]['reject_entities'] = [str(x).strip() for x in entities if str(x).strip()] if isinstance(entities, list) else []
                     logging.info(f"   ✖ [{idx}] {category}: {item.get('detail', '')} | {articles[idx]['title'][:70]}")
                 
         removed_count = len(articles) - len(filtered_articles)
@@ -993,6 +1033,10 @@ def process_backlog(stats):
                 reason = reasons_map.get(idx, NO_REASON)
                 stats["funnel"].setdefault("rejected_reasons", {})
                 stats["funnel"]["rejected_reasons"][reason] = stats["funnel"]["rejected_reasons"].get(reason, 0) + 1
+                stats["funnel"].setdefault("rejected_details", []).append({
+                    'title': item.get('title', ''), 'reason': reason,
+                    'detail': item.get('reject_detail', ''), 'entities': item.get('reject_entities', []),
+                })
                 cursor.execute(
                     "UPDATE articles SET status = 'rejected', rejection_reason = %s WHERE guid = %s",
                     (reason, guid)

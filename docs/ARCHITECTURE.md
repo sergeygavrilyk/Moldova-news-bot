@@ -28,7 +28,7 @@
 2. Створює словник `stats` (воронка, беклог, публікації, токени, помилки) і перевіряє, чи це перший запуск понеділка (`weekly_report_due`).
 3. `scrape_feeds(stats)` → `process_backlog(stats)`.
 4. Будь-яка неперехоплена помилка → алерт `⚠️ ALARM` в `ADMIN_CHAT_ID`.
-5. `finally`: рядок у `run_analytics`, `DELETE FROM articles WHERE created_at <= NOW() - 30 days`, рядки `model_calls`, звіт адміну; у перший запуск понеділка — ще й тижневий звіт (§2.4).
+5. `finally`: рядок у `run_analytics`, `DELETE FROM articles WHERE created_at <= NOW() - 30 days`, рядки `model_calls`, звіт адміну (з блоком «❌ Причини відхилення»: заголовок → категорія (пояснення моделі) | сутності; довгий звіт ділиться на повідомлення ≤ 4000 символів); у перший запуск понеділка — ще й тижневий звіт (§2.4).
 
 ### 2.1 Збір: `scrape_feeds()` (р. 712)
 
