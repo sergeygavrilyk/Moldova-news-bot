@@ -82,6 +82,13 @@ def parse_models(env_name, default):
 FILTER_MODELS = parse_models('GEMINI_FILTER_MODELS', DEFAULT_FILTER_MODELS)
 TRANSLATE_MODELS = parse_models('GEMINI_TRANSLATE_MODELS', DEFAULT_TRANSLATE_MODELS)
 
+# D-26 (M3): скільки разів пробувати весь каскад моделей, якщо всі відмовили не через квоту.
+# Було 4 (до 12 викликів і ризик не вкластися в 20 хв); 2 — один повтор: 31.10 саме він урятував переклад.
+GEMINI_CASCADE_ATTEMPTS = 2
+# D-23: таймаут одного запиту фільтра. Основна модель фільтра часто «висить» ~180 с і віддає 504;
+# вдалі відповіді — у 10 з 11 випадків до 80 с (дані model_calls 30.10–03.11). Переклад — 180 с (клієнт).
+FILTER_TIMEOUT_MS = 90_000
+
 EXHAUSTED_MODELS = set()  # моделі, чия квота вичерпана в цьому запуску — більше не смикаємо
 MODEL_USAGE = {"filter": None, "translate": None, "failed_attempts": 0}
 # ===================================================
@@ -241,7 +248,8 @@ def send_analytics_to_admin(stats):
             f"🔍 <b>Воронка фільтрації:</b>\n▪️ Знайдено в RSS: {stats['funnel']['scraped_total']}\n▪️ По джерелах: {scraped_src_str}\n"
             f"▪️ Пропущено (старі/вже в історії): {stats['funnel']['already_seen']}\n▪️ Відсіяно фільтрами: {stats['funnel']['rejected_by_keywords']}\n"
             f"▪️ Відсіяно Gemini: {stats['funnel']['duplicates_removed_by_ai']}"
-            f"{(' — ' + ', '.join(f'{k} {v}' for k, v in sorted(stats['funnel'].get('rejected_reasons', {}).items(), key=lambda kv: -kv[1]))) if stats['funnel'].get('rejected_reasons') else ''}\n\n"
+            f"{(' — ' + ', '.join(f'{k} {v}' for k, v in sorted(stats['funnel'].get('rejected_reasons', {}).items(), key=lambda kv: -kv[1]))) if stats['funnel'].get('rejected_reasons') else ''}\n"
+            f"{('▪️ Фільтр не повернув (лишились у черзі): ' + str(stats['funnel']['left_pending_by_filter']) + chr(10)) if stats['funnel'].get('left_pending_by_filter') else ''}\n"
             f"📥 <b>Беклог (очікують ШІ-валідації: {stats['backlog']['total_size']}):</b>\n▪️ {backlog_src_str}\n\n"
             f"✅ <b>{'Підготовлено (тест, не опубліковано)' if DRY_RUN else 'Опубліковано'}: {stats['published']['total']}</b>\n"
             f"▪️ Формат: З фото ({stats['published']['with_images']}; фото знайдено на сторінках статей: {stats['published'].get('og_images_found', 0)}) | Текст ({stats['published']['text_only']})\n"
@@ -429,7 +437,7 @@ SAFETY_OFF = [
 
 # Повтори tenacity: лише для тимчасових збоїв. Якщо квоту вичерпано для всіх моделей —
 # одразу здаємося (повтори в цьому запуску не допоможуть і лише марнують час).
-@retry(stop=stop_after_attempt(4), wait=wait_exponential(multiplier=2, min=5, max=60),
+@retry(stop=stop_after_attempt(GEMINI_CASCADE_ATTEMPTS), wait=wait_exponential(multiplier=2, min=5, max=60),
        retry=retry_if_not_exception_type(GeminiQuotaExhausted), reraise=True)
 def call_gemini_json(client, prompt):
     # Фільтр/дедуплікація: потрібен лише JSON за схемою -> lite-моделі з великою квотою (FILTER_MODELS)
@@ -441,7 +449,8 @@ def call_gemini_json(client, prompt):
                 response_mime_type="application/json",
                 response_schema=NewsFilterResponse,
                 temperature=0.0,
-                safety_settings=SAFETY_OFF
+                safety_settings=SAFETY_OFF,
+                http_options=types.HttpOptions(timeout=FILTER_TIMEOUT_MS),
             )
         )
         # ЗАХИСТ: Перевірка на порожню відповідь
@@ -451,7 +460,7 @@ def call_gemini_json(client, prompt):
 
     return run_model_cascade("filter", FILTER_MODELS, call)
 
-@retry(stop=stop_after_attempt(4), wait=wait_exponential(multiplier=2, min=15, max=60),
+@retry(stop=stop_after_attempt(GEMINI_CASCADE_ATTEMPTS), wait=wait_exponential(multiplier=2, min=15, max=60),
        retry=retry_if_not_exception_type(GeminiQuotaExhausted), reraise=True)
 def generate_news_texts(client, prompt, expected_count):
     # Переклад: flash-моделі, lite — лише останній резерв (TRANSLATE_MODELS)
@@ -1025,12 +1034,19 @@ def process_backlog(stats):
     if DRY_RUN:
         send_dry_run_filter_report(list(evaluated_guids.values()), approved_guids, reasons_map, candidate_batch)
 
-    # Кандидати, яких немає серед схвалених, — відхилені: статус rejected і причина в БД
+    # Кандидати, яких немає серед схвалених, — відхилені: статус rejected і причина в БД.
+    # D-27 (M4): новину, якої фільтр не повернув ні в keep, ні в rejected, не відхиляємо —
+    # вона лишається 'pending' і піде у фільтр наступного запуску (застаріле прибере expired через 12 год)
     try:
         for idx, item in enumerate(evaluated_guids.values()):
             guid = item['guid']
             if guid not in approved_guids:
-                reason = reasons_map.get(idx, NO_REASON)
+                if idx not in reasons_map:
+                    stats["funnel"]["left_pending_by_filter"] = stats["funnel"].get("left_pending_by_filter", 0) + 1
+                    stats["funnel"]["duplicates_removed_by_ai"] -= 1
+                    logging.warning(f"⏸ Фільтр не повернув новину [{idx}] — лишається в черзі: {item.get('title', '')[:70]}")
+                    continue
+                reason = reasons_map[idx]
                 stats["funnel"].setdefault("rejected_reasons", {})
                 stats["funnel"]["rejected_reasons"][reason] = stats["funnel"]["rejected_reasons"].get(reason, 0) + 1
                 stats["funnel"].setdefault("rejected_details", []).append({
@@ -1228,7 +1244,8 @@ def send_dry_run_filter_report(evaluated, approved_guids, reasons_map, kept_orde
     lines += ["", "✖ <b>Відкинуто:</b>"]
     for idx, item in enumerate(evaluated):
         if item['guid'] not in approved_guids:
-            lines.append(f"• [{esc(reasons_map.get(idx, NO_REASON))}] {esc(_short(item['title'], 100))}")
+            label = reasons_map.get(idx, "у черзі — фільтр не повернув")
+            lines.append(f"• [{esc(label)}] {esc(_short(item['title'], 100))}")
     send_admin_html("\n".join(lines))
 
 _TRAILING_HASHTAGS_RE = re.compile(r'(?:\s*#[^\s#<>]+)+\s*$')
