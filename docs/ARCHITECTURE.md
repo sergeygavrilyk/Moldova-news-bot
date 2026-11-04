@@ -96,7 +96,7 @@
 | Завдання | Моделі за замовчуванням (по черзі) | Змінна GitHub Variables |
 |---|---|---|
 | Фільтр/дедуплікація (JSON) | `gemini-3-flash-preview` → `gemini-3.5-flash-lite` → `gemini-3.1-flash-lite` (з PR #14) | `GEMINI_FILTER_MODELS` |
-| Переклад | `gemini-3.8-flash` → `gemini-3.6-flash` → `gemini-3.5-flash-lite` (останній резерв) | `GEMINI_TRANSLATE_MODELS` |
+| Переклад | `gemini-3.6-flash` → `gemini-3.8-flash` → `gemini-3.5-flash-lite` (останній резерв); з 04.11.2026 (R-16) `3.6-flash` першою — надійніша за статистикою `model_calls` | `GEMINI_TRANSLATE_MODELS` |
 | Ембединги | `gemini-embedding-001` (без повторів; помилка → стаття без вектора) | — |
 
 Таймаут запиту: переклад — 180 с (`HttpOptions(timeout=180_000)` клієнта), фільтр — 90 с (`FILTER_TIMEOUT_MS`, D-23, з PR #20); «зависла» модель = збій, каскад іде далі.

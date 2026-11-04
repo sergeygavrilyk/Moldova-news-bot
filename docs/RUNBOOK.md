@@ -102,7 +102,7 @@ SELECT model, COUNT(*) FROM model_calls
 WHERE task = 'translate' AND outcome = 'ok' AND created_at > NOW() - INTERVAL '7 days'
 GROUP BY 1 ORDER BY 2 DESC;
 ```
-У звіті адміну після кожного запуску — рядок `🧾 Спроби: 3.8-flash 503 | 3.6-flash ✅`.
+У звіті адміну після кожного запуску — рядок `🧾 Спроби: 3-flash-preview 503 | 3.5-flash-lite ✅ | 3.6-flash ✅`.
 
 ## 5. Типові операції
 
