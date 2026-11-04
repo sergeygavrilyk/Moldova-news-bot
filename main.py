@@ -72,8 +72,10 @@ client = genai.Client(api_key=GEMINI_API_KEY, http_options=types.HttpOptions(tim
 # gemini-3.7-flash -> на 3.8-flash — НЕ використовувати (фактично витрачають квоту інших моделей).
 # Фільтр: gemini-3-flash-preview (окрема flash-модель, не перетинається з моделями перекладу) -> lite як резерв.
 # gemini-3.1-flash-lite: відключення не раніше 07.05.2027.
+# Переклад (R-16, 04.11.2026): 3.6-flash першою — за model_calls 30.10–04.11 вона відповідала в 64 % спроб,
+# 3.8-flash — лише в 23 % (решта 503/504 з очікуванням ~1 хв); квота жодного разу не вичерпувалась.
 DEFAULT_FILTER_MODELS = "gemini-3-flash-preview,gemini-3.5-flash-lite,gemini-3.1-flash-lite"
-DEFAULT_TRANSLATE_MODELS = "gemini-3.8-flash,gemini-3.6-flash,gemini-3.5-flash-lite"
+DEFAULT_TRANSLATE_MODELS = "gemini-3.6-flash,gemini-3.8-flash,gemini-3.5-flash-lite"
 
 def parse_models(env_name, default):
     raw = os.getenv(env_name) or default
