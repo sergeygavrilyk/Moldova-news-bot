@@ -58,6 +58,9 @@ DATABASE_URL = os.getenv('DATABASE_URL')
 
 MAX_AGE_SECONDS = 43200 # 12 годин
 BATCH_SIZE = 3
+# Надолуження (05.11.2026, рішення власника): якщо попередній запуск нічого не опублікував через збій
+# (published_total = 0 і errors_count > 0 у run_analytics) — цей запуск бере до 6 новин замість 3.
+CATCHUP_BATCH_SIZE = 6
 # Таймаут 180 с на запит: модель, що «зависла», не блокує запуск — каскад перейде до наступної
 client = genai.Client(api_key=GEMINI_API_KEY, http_options=types.HttpOptions(timeout=180_000))
 
@@ -74,8 +77,11 @@ client = genai.Client(api_key=GEMINI_API_KEY, http_options=types.HttpOptions(tim
 # gemini-3.1-flash-lite: відключення не раніше 07.05.2027.
 # Переклад (R-16, 04.11.2026): 3.6-flash першою — за model_calls 30.10–04.11 вона відповідала в 64 % спроб,
 # 3.8-flash — лише в 23 % (решта 503/504 з очікуванням ~1 хв); квота жодного разу не вичерпувалась.
+# Переклад БЕЗ lite (05.11.2026, рішення власника): 3.5-flash-lite перекладає погано («держзраку» 03.11,
+# «Дорин Жунгиету» 30.10). Якщо обидві flash-моделі недоступні — партія лишається 'pending' до наступного
+# запуску, а той бере CATCHUP_BATCH_SIZE новин.
 DEFAULT_FILTER_MODELS = "gemini-3-flash-preview,gemini-3.5-flash-lite,gemini-3.1-flash-lite"
-DEFAULT_TRANSLATE_MODELS = "gemini-3.6-flash,gemini-3.8-flash,gemini-3.5-flash-lite"
+DEFAULT_TRANSLATE_MODELS = "gemini-3.6-flash,gemini-3.8-flash"
 
 def parse_models(env_name, default):
     raw = os.getenv(env_name) or default
@@ -256,6 +262,8 @@ def send_analytics_to_admin(stats):
             f"✅ <b>{'Підготовлено (тест, не опубліковано)' if DRY_RUN else 'Опубліковано'}: {stats['published']['total']}</b>\n"
             f"▪️ Формат: З фото ({stats['published']['with_images']}; фото знайдено на сторінках статей: {stats['published'].get('og_images_found', 0)}) | Текст ({stats['published']['text_only']})\n"
             f"▪️ Пріоритет 🇺🇦: {stats['published']['ukraine_priority']}\n▪️ Джерела: {pub_src_str}"
+            f"{(chr(10) + '⏩ Надолуження: партія ' + str(stats['batch_size']) + ' новин (попередній запуск нічого не опублікував)') if stats.get('batch_size', BATCH_SIZE) > BATCH_SIZE else ''}"
+            f"{(chr(10) + '⏸ Переклад відкладено: ' + str(stats['translation_deferred']) + ' новин лишились у черзі (flash-моделі недоступні)') if stats.get('translation_deferred') else ''}"
         )
         details = rejection_details_block(stats['funnel'].get('rejected_details', []))
         if details:
@@ -911,9 +919,31 @@ def scrape_feeds(stats):
     cursor.close()          
     conn.close()
 
+def choose_batch_size(last_run):
+    """Скільки новин публікувати: CATCHUP_BATCH_SIZE, якщо попередній запуск нічого не опублікував
+    через збій (published_total = 0 і errors_count > 0), інакше BATCH_SIZE.
+    last_run — (published_total, errors_count) останнього рядка run_analytics або None."""
+    if not last_run:
+        return BATCH_SIZE
+    published, errors = last_run
+    return CATCHUP_BATCH_SIZE if (published or 0) == 0 and (errors or 0) > 0 else BATCH_SIZE
+
+def get_last_run(cursor):
+    """(published_total, errors_count) попереднього запуску; None, якщо даних немає або запит упав."""
+    try:
+        cursor.execute("SELECT published_total, errors_count FROM run_analytics ORDER BY timestamp DESC LIMIT 1")
+        return cursor.fetchone()
+    except Exception as db_err:
+        logging.error(f"Помилка читання попереднього запуску: {db_err}")
+        return None
+
 def process_backlog(stats):
     conn = get_db_connection()
     cursor = conn.cursor()
+    batch_size = choose_batch_size(get_last_run(cursor))
+    stats["batch_size"] = batch_size
+    if batch_size > BATCH_SIZE:
+        logging.info(f"⏩ Попередній запуск нічого не опублікував через збій — беремо до {batch_size} новин")
     
     # --- Відновлення статей, що зависли в статусі 'processing' ---
     try:
@@ -1034,7 +1064,7 @@ def process_backlog(stats):
     approved_guids = {item['guid'] for item in candidate_batch}
 
     if DRY_RUN:
-        send_dry_run_filter_report(list(evaluated_guids.values()), approved_guids, reasons_map, candidate_batch)
+        send_dry_run_filter_report(list(evaluated_guids.values()), approved_guids, reasons_map, candidate_batch, batch_size)
 
     # Кандидати, яких немає серед схвалених, — відхилені: статус rejected і причина в БД.
     # D-27 (M4): новину, якої фільтр не повернув ні в keep, ні в rejected, не відхиляємо —
@@ -1064,7 +1094,7 @@ def process_backlog(stats):
         logging.error(f"Помилка оновлення статусу rejected та причин: {db_err}")
     # ---------------------------------------------------------------------
 
-    batch = candidate_batch[:BATCH_SIZE]
+    batch = candidate_batch[:batch_size]
     if not batch:
         cursor.close()
         conn.close()
@@ -1149,6 +1179,7 @@ def process_backlog(stats):
     except Exception as e:
         logging.error(f"❌ Помилка Gemini під час перекладу: {e}")
         stats["errors_count"] += 1 
+        stats["translation_deferred"] = len(batch)
         
         # --- Повертаємо статті партії назад у чергу ---
         try:
@@ -1235,11 +1266,11 @@ def _short(text, limit):
     cut = text[:limit].rsplit(' ', 1)[0]
     return (cut if len(cut) > limit * 0.6 else text[:limit]).rstrip(' ,.;:') + '…'
 
-def send_dry_run_filter_report(evaluated, approved_guids, reasons_map, kept_ordered):
+def send_dry_run_filter_report(evaluated, approved_guids, reasons_map, kept_ordered, batch_size=BATCH_SIZE):
     """DRY_RUN: що фільтр залишив і що відкинув (з категоріями) — щоб оцінити зміни промпту."""
     esc = lambda s: html_lib.escape(str(s or ''), quote=False)
     lines = [f"🧪 <b>ТЕСТ: фільтр Gemini</b> ({MODEL_USAGE.get('filter') or '—'})", "",
-             f"✅ <b>Залишено {len(kept_ordered)}</b> (у пости підуть перші {BATCH_SIZE}):"]
+             f"✅ <b>Залишено {len(kept_ordered)}</b> (у пости підуть перші {batch_size}):"]
     for i, item in enumerate(kept_ordered):
         mark = "🔄 " if item.get('is_update') else ""
         lines.append(f"{i + 1}. {mark}{esc(_short(item['title'], 110))} <i>({esc(item.get('source'))})</i>")
