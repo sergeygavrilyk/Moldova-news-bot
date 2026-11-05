@@ -58,9 +58,19 @@ DATABASE_URL = os.getenv('DATABASE_URL')
 
 MAX_AGE_SECONDS = 43200 # 12 годин
 BATCH_SIZE = 3
-# Надолуження (05.11.2026, рішення власника): якщо попередній запуск нічого не опублікував через збій
-# (published_total = 0 і errors_count > 0 у run_analytics) — цей запуск бере до 6 новин замість 3.
-CATCHUP_BATCH_SIZE = 6
+# Надолуження (R-17, 05.11.2026, рішення власника): за кожен попередній запуск поспіль, що нічого не опублікував
+# через збій (published_total = 0 і errors_count > 0 у run_analytics), партія більша на BATCH_SIZE; стеля MAX_BATCH_SIZE.
+# Накопичені новини лишаються 'pending' і щоразу заново проходять фільтр Gemini (дублі, історія).
+MAX_BATCH_SIZE = 12
+# Переклад частинами: один запит до Gemini на TRANSLATE_CHUNK_SIZE новин (довгий запит частіше падає / плутає '|||').
+TRANSLATE_CHUNK_SIZE = 3
+# Резерв lite для перекладу (R-17): вмикається, лише якщо стільки останніх запусків поспіль переклад не вдався
+# (503 / таймаут / квота — за таблицею model_calls).
+LITE_FALLBACK_AFTER_FAILED_RUNS = 3
+TRANSLATE_FALLBACK_MODEL = os.getenv('GEMINI_TRANSLATE_FALLBACK_MODEL') or "gemini-3.5-flash-lite"
+# Після стількох секунд від старту запуску нові частини перекладу не беремо (job: timeout-minutes 20)
+RUN_TIME_BUDGET_SECONDS = 13 * 60
+RUN_STARTED = time.time()
 # Таймаут 180 с на запит: модель, що «зависла», не блокує запуск — каскад перейде до наступної
 client = genai.Client(api_key=GEMINI_API_KEY, http_options=types.HttpOptions(timeout=180_000))
 
@@ -79,7 +89,7 @@ client = genai.Client(api_key=GEMINI_API_KEY, http_options=types.HttpOptions(tim
 # 3.8-flash — лише в 23 % (решта 503/504 з очікуванням ~1 хв); квота жодного разу не вичерпувалась.
 # Переклад БЕЗ lite (05.11.2026, рішення власника): 3.5-flash-lite перекладає погано («держзраку» 03.11,
 # «Дорин Жунгиету» 30.10). Якщо обидві flash-моделі недоступні — партія лишається 'pending' до наступного
-# запуску, а той бере CATCHUP_BATCH_SIZE новин.
+# запуску (надолуження +3). Lite — лише аварійний резерв: LITE_FALLBACK_AFTER_FAILED_RUNS невдалих запусків поспіль.
 DEFAULT_FILTER_MODELS = "gemini-3-flash-preview,gemini-3.5-flash-lite,gemini-3.1-flash-lite"
 DEFAULT_TRANSLATE_MODELS = "gemini-3.6-flash,gemini-3.8-flash"
 
@@ -262,7 +272,8 @@ def send_analytics_to_admin(stats):
             f"✅ <b>{'Підготовлено (тест, не опубліковано)' if DRY_RUN else 'Опубліковано'}: {stats['published']['total']}</b>\n"
             f"▪️ Формат: З фото ({stats['published']['with_images']}; фото знайдено на сторінках статей: {stats['published'].get('og_images_found', 0)}) | Текст ({stats['published']['text_only']})\n"
             f"▪️ Пріоритет 🇺🇦: {stats['published']['ukraine_priority']}\n▪️ Джерела: {pub_src_str}"
-            f"{(chr(10) + '⏩ Надолуження: партія ' + str(stats['batch_size']) + ' новин (попередній запуск нічого не опублікував)') if stats.get('batch_size', BATCH_SIZE) > BATCH_SIZE else ''}"
+            f"{(chr(10) + '⏩ Надолуження: партія ' + str(stats['batch_size']) + ' новин (попередні запуски нічого не опублікували)') if stats.get('batch_size', BATCH_SIZE) > BATCH_SIZE else ''}"
+            f"{(chr(10) + '🆘 Резерв ' + TRANSLATE_FALLBACK_MODEL + ' для перекладу: ' + str(LITE_FALLBACK_AFTER_FAILED_RUNS) + ' запуски поспіль без перекладу') if stats.get('lite_fallback') else ''}"
             f"{(chr(10) + '⏸ Переклад відкладено: ' + str(stats['translation_deferred']) + ' новин лишились у черзі (flash-моделі недоступні)') if stats.get('translation_deferred') else ''}"
         )
         details = rejection_details_block(stats['funnel'].get('rejected_details', []))
@@ -472,7 +483,7 @@ def call_gemini_json(client, prompt):
 
 @retry(stop=stop_after_attempt(GEMINI_CASCADE_ATTEMPTS), wait=wait_exponential(multiplier=2, min=15, max=60),
        retry=retry_if_not_exception_type(GeminiQuotaExhausted), reraise=True)
-def generate_news_texts(client, prompt, expected_count):
+def generate_news_texts(client, prompt, expected_count, models=None):
     # Переклад: flash-моделі, lite — лише останній резерв (TRANSLATE_MODELS)
     def call(model):
         response = client.models.generate_content(
@@ -511,7 +522,7 @@ def generate_news_texts(client, prompt, expected_count):
 
         return response, texts
 
-    return run_model_cascade("translate", TRANSLATE_MODELS, call)
+    return run_model_cascade("translate", models or TRANSLATE_MODELS, call)
 
 # ================= TELEGRAM HTML (D-12, D-19) =================
 # Теги, які розуміє Telegram parse_mode=HTML
@@ -919,31 +930,73 @@ def scrape_feeds(stats):
     cursor.close()          
     conn.close()
 
-def choose_batch_size(last_run):
-    """Скільки новин публікувати: CATCHUP_BATCH_SIZE, якщо попередній запуск нічого не опублікував
-    через збій (published_total = 0 і errors_count > 0), інакше BATCH_SIZE.
-    last_run — (published_total, errors_count) останнього рядка run_analytics або None."""
-    if not last_run:
-        return BATCH_SIZE
-    published, errors = last_run
-    return CATCHUP_BATCH_SIZE if (published or 0) == 0 and (errors or 0) > 0 else BATCH_SIZE
+def failed_runs_streak(last_runs):
+    """Скільки останніх запусків поспіль нічого не опублікували через збій (published_total = 0 і errors_count > 0).
+    last_runs — [(published_total, errors_count), ...] від найновішого."""
+    streak = 0
+    for published, errors in last_runs or []:
+        if (published or 0) == 0 and (errors or 0) > 0:
+            streak += 1
+        else:
+            break
+    return streak
 
-def get_last_run(cursor):
-    """(published_total, errors_count) попереднього запуску; None, якщо даних немає або запит упав."""
+def choose_batch_size(last_runs):
+    """Партія: BATCH_SIZE + BATCH_SIZE за кожен невдалий запуск поспіль, але не більше MAX_BATCH_SIZE."""
+    return min(MAX_BATCH_SIZE, BATCH_SIZE * (1 + failed_runs_streak(last_runs)))
+
+def get_last_runs(cursor, limit=MAX_BATCH_SIZE // BATCH_SIZE):
+    """[(published_total, errors_count), ...] останніх запусків від найновішого; [] якщо запит упав."""
     try:
-        cursor.execute("SELECT published_total, errors_count FROM run_analytics ORDER BY timestamp DESC LIMIT 1")
-        return cursor.fetchone()
+        cursor.execute("SELECT published_total, errors_count FROM run_analytics ORDER BY timestamp DESC LIMIT %s", (limit,))
+        return cursor.fetchall() or []
     except Exception as db_err:
-        logging.error(f"Помилка читання попереднього запуску: {db_err}")
-        return None
+        logging.error(f"Помилка читання попередніх запусків: {db_err}")
+        conn_rollback(cursor)
+        return []
+
+def translation_failed_streak(cursor, limit=LITE_FALLBACK_AFTER_FAILED_RUNS):
+    """Скільки останніх запусків поспіль переклад не вдався (жодна модель не відповіла) — за model_calls.
+    Рядки одного запуску мають однаковий created_at."""
+    try:
+        cursor.execute(
+            "SELECT bool_or(outcome = 'ok') FROM model_calls WHERE task = 'translate' "
+            "GROUP BY created_at ORDER BY created_at DESC LIMIT %s", (limit,))
+        rows = cursor.fetchall() or []
+    except Exception as db_err:
+        logging.error(f"Помилка читання model_calls: {db_err}")
+        conn_rollback(cursor)
+        return 0
+    streak = 0
+    for (any_ok,) in rows:
+        if any_ok:
+            break
+        streak += 1
+    return streak
+
+def choose_translate_models(failed_streak):
+    """Flash-моделі; lite додається в кінець лише після LITE_FALLBACK_AFTER_FAILED_RUNS невдалих запусків поспіль."""
+    models = list(TRANSLATE_MODELS)
+    if failed_streak >= LITE_FALLBACK_AFTER_FAILED_RUNS and TRANSLATE_FALLBACK_MODEL not in models:
+        models.append(TRANSLATE_FALLBACK_MODEL)
+    return models
+
+def conn_rollback(cursor):
+    """Після помилки запиту транзакцію треба скинути, інакше наступні запити не виконаються."""
+    conn = getattr(cursor, 'connection', None)
+    try:
+        if conn is not None:
+            conn.rollback()
+    except Exception:
+        pass
 
 def process_backlog(stats):
     conn = get_db_connection()
     cursor = conn.cursor()
-    batch_size = choose_batch_size(get_last_run(cursor))
+    batch_size = choose_batch_size(get_last_runs(cursor))
     stats["batch_size"] = batch_size
     if batch_size > BATCH_SIZE:
-        logging.info(f"⏩ Попередній запуск нічого не опублікував через збій — беремо до {batch_size} новин")
+        logging.info(f"⏩ Попередні запуски нічого не опублікували через збій — беремо до {batch_size} новин")
     
     # --- Відновлення статей, що зависли в статусі 'processing' ---
     try:
@@ -1130,6 +1183,79 @@ def process_backlog(stats):
             logging.error(f"Помилка збереження og:image: {db_err}")
             conn.rollback()
           
+    translate_models = choose_translate_models(translation_failed_streak(cursor))
+    if TRANSLATE_FALLBACK_MODEL in translate_models and TRANSLATE_FALLBACK_MODEL not in TRANSLATE_MODELS:
+        stats["lite_fallback"] = True
+        logging.warning(f"🆘 {LITE_FALLBACK_AFTER_FAILED_RUNS} запуски поспіль без перекладу — дозволено резерв {TRANSLATE_FALLBACK_MODEL}")
+
+    def return_to_pending(guids):
+        try:
+            cursor.execute("UPDATE articles SET status = 'pending' WHERE guid = ANY(%s)", (guids,))
+            conn.commit()
+            logging.info(f"🔄 {len(guids)} статей повернуто в 'pending' для наступного запуску.")
+        except Exception as db_err:
+            logging.error(f"Помилка повернення статусу в БД: {db_err}")
+
+    # Переклад частинами по TRANSLATE_CHUNK_SIZE: якщо частина не перекладена — вона й решта партії лишаються в черзі
+    for start in range(0, len(batch), TRANSLATE_CHUNK_SIZE):
+        chunk = batch[start:start + TRANSLATE_CHUNK_SIZE]
+        rest_guids = batch_guids[start:]
+        if start > 0 and time.time() - RUN_STARTED > RUN_TIME_BUDGET_SECONDS:
+            logging.warning(f"⏱ Запуск триває понад {RUN_TIME_BUDGET_SECONDS // 60} хв — решта партії ({len(rest_guids)}) лишається в черзі")
+            stats["translation_deferred"] = len(rest_guids)
+            return_to_pending(rest_guids)
+            break
+
+        time.sleep(15)
+        try:
+            response, generated_texts = generate_news_texts(client, build_translate_prompt(chunk), len(chunk), translate_models)
+            if getattr(response, 'usage_metadata', None): stats["tokens_used"] += response.usage_metadata.total_token_count
+        except Exception as e:
+            logging.error(f"❌ Помилка Gemini під час перекладу: {e}")
+            stats["errors_count"] += 1
+            stats["translation_deferred"] = len(rest_guids)
+            return_to_pending(rest_guids)
+            break
+
+        # Модель, що відповіла, — першою для наступних частин (не чекати знову на недоступні)
+        ok_model = MODEL_USAGE.get('translate')
+        if ok_model in translate_models:
+            translate_models = [ok_model] + [m for m in translate_models if m != ok_model]
+
+        for idx, item in enumerate(chunk):
+            if idx >= len(generated_texts): break 
+            
+            images = item.get('image_urls', [])
+            post_text = apply_update_prefix(generated_texts[idx], item.get('is_update', False))
+            if send_to_telegram(post_text, item['url'], item.get('source', 'Джерело'), images):
+                try:
+                    cursor.execute("UPDATE articles SET status = 'sent' WHERE guid = %s", (item['guid'],))
+                    conn.commit()
+                    stats["published"]["total"] += 1
+                    if is_ukraine_related(item):
+                        stats["published"]["ukraine_priority"] += 1
+                    if images: stats["published"]["with_images"] += 1
+                    else: stats["published"]["text_only"] += 1
+                    stats["published"]["sources"][item.get('source', 'Джерело')] = stats["published"]["sources"].get(item.get('source', 'Джерело'), 0) + 1
+                      
+                    # Пауза між постами (ліміти Telegram, R-09); після останнього поста запуску чекати нема чого (D-17)
+                    if start + idx < len(batch) - 1:
+                        time.sleep(10 if DRY_RUN else 45)
+                except Exception as db_err: 
+                    logging.error(f"Помилка БД: {db_err}")
+            else:
+                stats["errors_count"] += 1
+                try:
+                    cursor.execute("UPDATE articles SET status = 'failed' WHERE guid = %s", (item['guid'],))
+                    conn.commit()
+                except Exception as db_err:
+                    logging.error(f"Помилка оновлення статусу failed в БД: {db_err}")
+
+    cursor.close()
+    conn.close()
+
+def build_translate_prompt(batch):
+    """Промпт перекладу для партії новин (текст промпту без змін — винесено з process_backlog для перекладу частинами)."""
     prompt = f"Ось список із {len(batch)} новин. Ти — досвідчений головний редактор Telegram-каналу для українців, які живуть у Молдові (діаспора, біженці). Твоє завдання — перекласти та адаптувати ці новини українською мовою.\n\n"
     prompt += """СУВОРІ ПРАВИЛА ПЕРЕКЛАДУ ТА ФОРМАТУВАННЯ:
     1. ГЕОГРАФІЯ: Зберігай оригінальну країну події. Якщо подія сталася в Молдові — пиши про Молдову, якщо в іншій країні (світові новини) — так і залишай. "Молдовани" — це місцеві жителі. НІКОЛИ не замінюй слова "молдовани" або "Молдова" на "українці" чи "Україна", якщо цього немає в оригінальному тексті.
@@ -1171,60 +1297,7 @@ def process_backlog(stats):
     
     5. ФОРМАТ ВИВОДУ: Розділяй готові тексти новин СУВОРО рядком `|||`.
     """
-      
-    time.sleep(15)
-    try:
-        response, generated_texts = generate_news_texts(client, prompt, len(batch))
-        if getattr(response, 'usage_metadata', None): stats["tokens_used"] += response.usage_metadata.total_token_count
-    except Exception as e:
-        logging.error(f"❌ Помилка Gemini під час перекладу: {e}")
-        stats["errors_count"] += 1 
-        stats["translation_deferred"] = len(batch)
-        
-        # --- Повертаємо статті партії назад у чергу ---
-        try:
-            cursor.execute("UPDATE articles SET status = 'pending' WHERE guid = ANY(%s)", (batch_guids,))
-            conn.commit()
-            logging.info("🔄 Статуси статей повернуто на 'pending' для повторної спроби у наступному запуску.")
-        except Exception as db_err:
-            logging.error(f"Помилка повернення статусу в БД: {db_err}")
-        # ---------------------------------------------------------
-            
-        cursor.close()
-        conn.close()
-        return
-
-    for idx, item in enumerate(batch):
-        if idx >= len(generated_texts): break 
-        
-        images = item.get('image_urls', [])
-        post_text = apply_update_prefix(generated_texts[idx], item.get('is_update', False))
-        if send_to_telegram(post_text, item['url'], item.get('source', 'Джерело'), images):
-            try:
-                cursor.execute("UPDATE articles SET status = 'sent' WHERE guid = %s", (item['guid'],))
-                conn.commit()
-                stats["published"]["total"] += 1
-                if is_ukraine_related(item):
-                    stats["published"]["ukraine_priority"] += 1
-                if images: stats["published"]["with_images"] += 1
-                else: stats["published"]["text_only"] += 1
-                stats["published"]["sources"][item.get('source', 'Джерело')] = stats["published"]["sources"].get(item.get('source', 'Джерело'), 0) + 1
-                  
-                # Пауза між постами (ліміти Telegram, R-09); після останнього поста запуску чекати нема чого (D-17)
-                if idx < len(batch) - 1:
-                    time.sleep(10 if DRY_RUN else 45)
-            except Exception as db_err: 
-                logging.error(f"Помилка БД: {db_err}")
-        else:
-            stats["errors_count"] += 1
-            try:
-                cursor.execute("UPDATE articles SET status = 'failed' WHERE guid = %s", (item['guid'],))
-                conn.commit()
-            except Exception as db_err:
-                logging.error(f"Помилка оновлення статусу failed в БД: {db_err}")
-
-    cursor.close()
-    conn.close()
+    return prompt
 
 UPDATE_PREFIX = "🔄 [ОНОВЛЕНО]: "
 _MODEL_UPDATE_PREFIX_RE = re.compile(r'🔄\s*\[ОНОВЛЕНО\]\s*:?\s*')
