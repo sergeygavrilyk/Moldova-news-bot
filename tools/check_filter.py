@@ -3,7 +3,8 @@
 Перевіряє, що поточна схема відповіді (NewsFilterResponse) приймається моделлю і що
 причини відхилення приходять з фіксованого переліку (D-04).
 Не публікує в Telegram і не звертається до БД. Витрачає 1 запит до моделі фільтра.
-Запуск: GitHub Actions -> «Check Gemini filter» (потрібен секрет GEMINI_API_KEY).
+Запуск: лише вручну, GitHub Actions -> «Check Gemini filter» (потрібен секрет GEMINI_API_KEY).
+Claude запускає його тільки після «так» власника (R-19).
 """
 import json
 import os
