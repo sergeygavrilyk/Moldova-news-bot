@@ -187,6 +187,74 @@ def run_model_cascade(task, models, call):
     # Інша помилка — її підхопить @retry (tenacity) і повторить каскад після паузи
     raise last_error
 
+# «Пам'ять» про недоступні моделі (I-07, як у хорватському боті — його T-21/R-19): модель, яка в останніх
+# MODEL_DEMOTE_AFTER_RUNS запусках, де її пробували (за MODEL_MEMORY_LOOKBACK_HOURS), не відповіла жодного разу
+# (503 / таймаут / квота), іде в кінець каскаду, доки з її останньої спроби не мине MODEL_PROBE_INTERVAL_SECONDS, —
+# тоді одна пробна спроба на звичному місці. Запуски, де модель не пробували (відповіла попередня), серію не
+# переривають. Дані — таблиця model_calls (рядки одного запуску мають однаковий created_at). Каскад не коротшає.
+MODEL_DEMOTE_AFTER_RUNS = 2
+MODEL_MEMORY_LOOKBACK_HOURS = 24
+# «Раз на 3 години»: остання спроба о 09:01 → відкладена о 10:01 і 11:01, пробна спроба о 12:01.
+# Мінус 10 хв — запас на «плаваючий» старт запусків (cron-job.org + черга GitHub Actions).
+MODEL_PROBE_INTERVAL_SECONDS = 3 * 60 * 60 - 10 * 60
+MODEL_FAILURE_OUTCOMES = {'unavailable', 'timeout', 'quota'}
+
+def demoted_models(rows, task, now):
+    """rows: (created_at, task, model, outcome) з model_calls; now — naive UTC datetime.
+    Повертає моделі, які треба відкласти в кінець каскаду для цієї задачі."""
+    runs = {}
+    for created_at, row_task, model, outcome in rows:
+        if row_task != task or not model or created_at is None:
+            continue
+        if (now - created_at).total_seconds() > MODEL_MEMORY_LOOKBACK_HOURS * 3600:
+            continue
+        runs.setdefault((created_at, model), set()).add(outcome)
+    per_model = {}
+    for (created_at, model), seen in sorted(runs.items()):
+        per_model.setdefault(model, []).append((created_at, 'ok' not in seen and bool(seen & MODEL_FAILURE_OUTCOMES)))
+    demoted = set()
+    for model, tried in per_model.items():
+        last = tried[-MODEL_DEMOTE_AFTER_RUNS:]
+        if (len(last) == MODEL_DEMOTE_AFTER_RUNS and all(failed for _, failed in last)
+                and (now - last[-1][0]).total_seconds() < MODEL_PROBE_INTERVAL_SECONDS):
+            demoted.add(model)
+    return demoted
+
+def reorder_cascade(cascade, demoted):
+    """Відкладені моделі — в кінець (у початковому порядку); каскад не коротшає."""
+    return [m for m in cascade if m not in demoted] + [m for m in cascade if m in demoted]
+
+def load_model_memory_rows():
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT created_at, task, model, outcome FROM model_calls "
+            "WHERE created_at > NOW() - make_interval(hours => %s)", (MODEL_MEMORY_LOOKBACK_HOURS,))
+        rows = cursor.fetchall() or []
+        cursor.close()
+        return rows
+    finally:
+        conn.close()
+
+def apply_model_memory(stats, rows, now=None):
+    global FILTER_MODELS, TRANSLATE_MODELS
+    now = now or datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+    demoted_all = []
+    for task, cascade in (("filter", FILTER_MODELS), ("translate", TRANSLATE_MODELS)):
+        demoted = demoted_models(rows, task, now) & set(cascade)
+        if not demoted:
+            continue
+        reordered = reorder_cascade(cascade, demoted)
+        if task == "filter":
+            FILTER_MODELS = reordered
+        else:
+            TRANSLATE_MODELS = reordered
+        demoted_all += [f"{task}: {m}" for m in cascade if m in demoted]
+        logging.warning(f"⏬ {task}: моделі {', '.join(sorted(demoted))} відкладено в кінець каскаду: {', '.join(reordered)}")
+    if stats is not None:
+        stats["demoted_models"] = demoted_all
+
 class _ReadOnlyCursor:
     """DRY_RUN: SELECT виконується по-справжньому, INSERT/UPDATE/DELETE/DDL — лише пишуться в лог."""
     _WRITE = ('INSERT', 'UPDATE', 'DELETE', 'ALTER', 'CREATE', 'DROP', 'TRUNCATE', 'VACUUM')
@@ -233,53 +301,111 @@ def get_db_connection(read_only=False):
     conn = psycopg2.connect(DATABASE_URL)
     return _ReadOnlyConnection(conn) if (DRY_RUN or read_only) else conn
 
+# Токени за календарні періоди за часом власника: день — з 00:00, тиждень — з понеділка, місяць — з 1-го числа.
+# run_analytics.timestamp — UTC без часового поясу.
+TOKENS_REPORT_TZ = "Europe/Zagreb"
+TOKENS_PERIODS_SQL = """
+    WITH b AS (SELECT (NOW() AT TIME ZONE %(tz)s) AS local_now)
+    SELECT
+        COALESCE(SUM(tokens_used) FILTER (WHERE (timestamp AT TIME ZONE 'UTC' AT TIME ZONE %(tz)s) >= date_trunc('day', b.local_now)), 0),
+        COALESCE(SUM(tokens_used) FILTER (WHERE (timestamp AT TIME ZONE 'UTC' AT TIME ZONE %(tz)s) >= date_trunc('week', b.local_now)), 0),
+        COALESCE(SUM(tokens_used) FILTER (WHERE (timestamp AT TIME ZONE 'UTC' AT TIME ZONE %(tz)s) >= date_trunc('month', b.local_now)), 0)
+    FROM run_analytics, b
+    WHERE timestamp >= NOW() - INTERVAL '32 days'
+"""
+
+def _breakdown(counts):
+    """« (Спорт 3, Дублікат 1)» — за спаданням, однакові — за назвою."""
+    if not counts:
+        return ""
+    parts = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    return " (" + ", ".join(f"{k} {v}" for k, v in parts) + ")"
+
+def build_analytics_message(stats, tokens):
+    """Звіт після запуску — у форматі хорватського бота (запит власника 08.11) + рядки, яких у хорватському немає."""
+    esc = lambda v: html_lib.escape(str(v), quote=False)
+    funnel, backlog, published = stats['funnel'], stats['backlog'], stats['published']
+    scraped_src = ", ".join(f"{k}: {v}" for k, v in funnel.get('scraped_by_source', {}).items()) or "Немає"
+    backlog_src = ", ".join(f"{k}: {v}" for k, v in backlog['sources'].items()) or "Порожньо"
+    pub_src = ", ".join(f"{k}: {v}" for k, v in published['sources'].items()) or "Немає"
+    models_str = f"фільтр — {(MODEL_USAGE['filter'] or '—').replace('gemini-', '')} | переклад — {(MODEL_USAGE['translate'] or '—').replace('gemini-', '')}"
+
+    seen_parts = []
+    if funnel.get('already_rejected'):
+        seen_parts.append(f"з них відхилені фільтром раніше: {funnel['already_rejected']}")
+    if funnel.get('semantic_duplicates'):
+        seen_parts.append(f"смислові дублі: {funnel['semantic_duplicates']}")
+    seen_str = f" ({', '.join(seen_parts)})" if seen_parts else ""
+
+    lines = []
+    if DRY_RUN:
+        lines += ["🧪 <b>ТЕСТОВИЙ ЗАПУСК (DRY_RUN)</b> — нічого не опубліковано й не записано в БД", ""]
+    lines += [
+        "📊 <b>Звіт Moldova News Bot</b>",
+        "",
+        f"⏱ Час виконання: {stats['execution_time']} сек",
+        f"⚠️ Помилок: {stats['errors_count']} | Повторних спроб Gemini: {stats['gemini_retries']}",
+        "",
+        "🔍 <b>Воронка:</b>",
+        f"▪️ Переглянуто RSS-записів: {funnel['scraped_total']}",
+        f"▪️ За джерелами: {esc(scraped_src)}",
+    ]
+    if stats.get('failed_sources'):
+        lines.append(f"🔴 Недоступні джерела: {esc(', '.join(stats['failed_sources']))}")
+    lines += [
+        f"▪️ Уже відомі/застарілі: {funnel['already_seen']}{seen_str}",
+        f"▪️ Відсіяно кодом: {funnel['rejected_by_keywords']}{esc(_breakdown(funnel.get('rejected_by_rule')))}",
+        f"▪️ Відхилено Gemini: {funnel['duplicates_removed_by_ai']}{esc(_breakdown(funnel.get('rejected_reasons')))}",
+    ]
+    if funnel.get('left_pending_by_filter'):
+        lines.append(f"▪️ Фільтр не повернув (лишились у черзі): {funnel['left_pending_by_filter']}")
+    lines.append("")
+    details = rejection_details_block(funnel.get('rejected_details', []))
+    lines += (details.split("\n") if details else ["❌ <b>Причини відхилення:</b>", "Немає деталей"])
+    lines += [
+        "",
+        f"📥 <b>Беклог: {backlog['total_size']}</b>",
+        f"▪️ {esc(backlog_src)}",
+        "",
+        f"✅ <b>{'Підготовлено (тест, не опубліковано)' if DRY_RUN else 'Опубліковано'}: {published['total']}</b>",
+        f"▪️ Із фото: {published['with_images']} (з них зі сторінки статті: {published.get('og_images_found', 0)}) | Текстом: {published['text_only']}",
+        f"▪️ Український пріоритет: {published['ukraine_priority']}",
+        f"▪️ Джерела: {esc(pub_src)}",
+    ]
+    if stats.get('batch_size', BATCH_SIZE) > BATCH_SIZE:
+        lines.append(f"⏩ Надолуження: партія {stats['batch_size']} новин (попередні запуски нічого не опублікували)")
+    if stats.get('lite_fallback'):
+        lines.append(f"🆘 Резерв {TRANSLATE_FALLBACK_MODEL} для перекладу: {LITE_FALLBACK_AFTER_FAILED_RUNS} запуски поспіль без перекладу")
+    if stats.get('translation_deferred'):
+        lines.append(f"⏸ Переклад відкладено: {stats['translation_deferred']} новин лишились у черзі (flash-моделі недоступні)")
+    lines += ["", f"🤖 <b>Моделі:</b> {esc(models_str)}"]
+    if EXHAUSTED_MODELS:
+        lines.append(f"⛽ Квоту вичерпано: {esc(', '.join(sorted(EXHAUSTED_MODELS)))}")
+    if MODEL_CALLS:
+        lines.append(f"🧾 Спроби: {esc(model_calls_summary())}")
+    if stats.get('demoted_models'):
+        lines.append(
+            f"⏬ Відкладено в кінець каскаду (не відповідали {MODEL_DEMOTE_AFTER_RUNS} запуски поспіль; пробна спроба — раз на 3 год): "
+            f"{esc(', '.join(stats['demoted_models']))}")
+    if tokens is not None:
+        day, week, month = tokens
+        lines += ["", f"🪙 Токени (сьогодні / тиждень / місяць): {int(day):,} / {int(week):,} / {int(month):,}"]
+    return "\n".join(lines)
+
 def send_analytics_to_admin(stats):
     if not ADMIN_CHAT_ID: return
+    tokens = None
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("""
-            SELECT 
-                COALESCE(SUM(tokens_used) FILTER (WHERE timestamp >= NOW() - INTERVAL '1 day'), 0),
-                COALESCE(SUM(tokens_used) FILTER (WHERE timestamp >= NOW() - INTERVAL '7 days'), 0),
-                COALESCE(SUM(tokens_used) FILTER (WHERE timestamp >= NOW() - INTERVAL '30 days'), 0)
-            FROM run_analytics
-        """)
-        tokens_day, tokens_week, tokens_month = cursor.fetchone()
+        cursor.execute(TOKENS_PERIODS_SQL, {"tz": TOKENS_REPORT_TZ})
+        tokens = cursor.fetchone()
         cursor.close()
         conn.close()
-        
-        scraped_src_str = ", ".join([f"{k}: {v}" for k, v in stats['funnel'].get('scraped_by_source', {}).items()]) if stats['funnel'].get('scraped_by_source') else "Немає"
-        backlog_src_str = ", ".join([f"{k}: {v}" for k, v in stats['backlog']['sources'].items()]) if stats['backlog']['sources'] else "Порожньо"
-        pub_src_str = ", ".join([f"{k}: {v}" for k, v in stats['published']['sources'].items()]) if stats['published']['sources'] else "Немає"
-        models_str = f"фільтр — {MODEL_USAGE['filter'] or '—'} | переклад — {MODEL_USAGE['translate'] or '—'}"
-        exhausted_str = f"\n⛽ Квоту вичерпано: {', '.join(sorted(EXHAUSTED_MODELS))}" if EXHAUSTED_MODELS else ""
-        failed_src_str = f"\n🔴 Недоступні джерела: {', '.join(stats['failed_sources'])}" if stats.get('failed_sources') else ""
-
-        message = (
-            f"{'🧪 <b>ТЕСТОВИЙ ЗАПУСК (DRY_RUN)</b> — нічого не опубліковано й не записано в БД' + chr(10) + chr(10) if DRY_RUN else ''}"
-            f"📊 <b>Розширений звіт бота (Молдова)</b>\n\n"
-            f"⏱ Час: {stats['execution_time']} сек | ⚠️ Помилок: {stats['errors_count']} | 🔄 Невдалих спроб моделей: {stats['gemini_retries']}\n"
-            f"🤖 Моделі: {models_str}{exhausted_str}{failed_src_str}\n"
-            f"{('🧾 Спроби: ' + model_calls_summary() + chr(10)) if MODEL_CALLS else ''}"
-            f"🪙 <b>Токени (сьогодні/тиждень/місяць):</b>\n   {tokens_day:,} / {tokens_week:,} / {tokens_month:,}\n\n"
-            f"🔍 <b>Воронка фільтрації:</b>\n▪️ Знайдено в RSS: {stats['funnel']['scraped_total']}\n▪️ По джерелах: {scraped_src_str}\n"
-            f"▪️ Пропущено (старі/вже в історії): {stats['funnel']['already_seen']}\n▪️ Відсіяно фільтрами: {stats['funnel']['rejected_by_keywords']}\n"
-            f"▪️ Відсіяно Gemini: {stats['funnel']['duplicates_removed_by_ai']}"
-            f"{(' — ' + ', '.join(f'{k} {v}' for k, v in sorted(stats['funnel'].get('rejected_reasons', {}).items(), key=lambda kv: -kv[1]))) if stats['funnel'].get('rejected_reasons') else ''}\n"
-            f"{('▪️ Фільтр не повернув (лишились у черзі): ' + str(stats['funnel']['left_pending_by_filter']) + chr(10)) if stats['funnel'].get('left_pending_by_filter') else ''}\n"
-            f"📥 <b>Беклог (очікують ШІ-валідації: {stats['backlog']['total_size']}):</b>\n▪️ {backlog_src_str}\n\n"
-            f"✅ <b>{'Підготовлено (тест, не опубліковано)' if DRY_RUN else 'Опубліковано'}: {stats['published']['total']}</b>\n"
-            f"▪️ Формат: З фото ({stats['published']['with_images']}; фото знайдено на сторінках статей: {stats['published'].get('og_images_found', 0)}) | Текст ({stats['published']['text_only']})\n"
-            f"▪️ Пріоритет 🇺🇦: {stats['published']['ukraine_priority']}\n▪️ Джерела: {pub_src_str}"
-            f"{(chr(10) + '⏩ Надолуження: партія ' + str(stats['batch_size']) + ' новин (попередні запуски нічого не опублікували)') if stats.get('batch_size', BATCH_SIZE) > BATCH_SIZE else ''}"
-            f"{(chr(10) + '🆘 Резерв ' + TRANSLATE_FALLBACK_MODEL + ' для перекладу: ' + str(LITE_FALLBACK_AFTER_FAILED_RUNS) + ' запуски поспіль без перекладу') if stats.get('lite_fallback') else ''}"
-            f"{(chr(10) + '⏸ Переклад відкладено: ' + str(stats['translation_deferred']) + ' новин лишились у черзі (flash-моделі недоступні)') if stats.get('translation_deferred') else ''}"
-        )
-        details = rejection_details_block(stats['funnel'].get('rejected_details', []))
-        if details:
-            message += "\n\n" + details
-
+    except Exception as e:
+        logging.error(f"Помилка підрахунку токенів для звіту: {e}")
+    try:
+        message = build_analytics_message(stats, tokens)
         # Telegram приймає до 4096 символів: довгий звіт ділимо по рядках на кілька повідомлень
         for chunk in split_message_lines(message):
             send_admin_html(chunk)
@@ -412,9 +538,12 @@ def fetch_og_image(scraper, page_url, timeout=10):
         logging.warning(f"og:image не отримано для {page_url}: {e}")
         return None
 
-def is_quality_article(title, description, url):
+def quality_rejection_reason(title, description, url):
+    """Чому код відсіює новину (None — пропускає). Правила й порядок ті самі, що були в is_quality_article;
+    причина йде лише у звіт адміну: «Відсіяно кодом: 4 (URL /sport/ 2, foto 1, КАПС у заголовку 1)»."""
     unwanted_url_categories = ['/lume/', '/sport/', '/divertisment/', '/lifestyle/', '/magazin/', '/showbiz/', '/horoscop/', '/fun/']
-    if any(category in url.lower() for category in unwanted_url_categories): return False
+    for category in unwanted_url_categories:
+        if category in url.lower(): return f"URL {category}"
     
     unwanted_keywords = [
         # --- Реклама та промо (Румунські + Англійські) ---
@@ -439,15 +568,18 @@ def is_quality_article(title, description, url):
     
     text_to_check = f"{title} {description} {url}".lower()
     for word in unwanted_keywords:
-        if re.search(rf'\b{word}\b', text_to_check): return False
+        if re.search(rf'\b{word}\b', text_to_check): return word
         
-    if len(title.strip()) < 15 or len(text_to_check.strip()) < 20: return False
-    if "!!!" in title or "???" in title: return False
+    if len(title.strip()) < 15 or len(text_to_check.strip()) < 20: return "короткий текст"
+    if "!!!" in title or "???" in title: return "!!!/???"
     
     letters = [c for c in title if c.isalpha()]
-    if letters and (sum(1 for c in letters if c.isupper()) / len(letters)) > 0.4: return False
+    if letters and (sum(1 for c in letters if c.isupper()) / len(letters)) > 0.4: return "КАПС у заголовку"
     
-    return True
+    return None
+
+def is_quality_article(title, description, url):
+    return quality_rejection_reason(title, description, url) is None
 
 SAFETY_OFF = [
     types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
@@ -800,6 +932,12 @@ def scrape_feeds(stats):
     cursor.execute("SELECT title FROM articles WHERE created_at >= NOW() - INTERVAL '3 days'")
     db_titles = {row[0] for row in cursor.fetchall()}
 
+    # Для звіту: скільки з «уже відомих» фільтр Gemini відхилив раніше
+    cursor.execute("SELECT url, title FROM articles WHERE created_at >= NOW() - INTERVAL '3 days' AND status = 'rejected'")
+    rejected_rows = cursor.fetchall() or []
+    rejected_urls = {row[0] for row in rejected_rows}
+    rejected_titles = {row[1] for row in rejected_rows}
+
     for source_id, source_name, feed_url, source_status in active_sources:
         if "scraped_by_source" not in stats["funnel"]: stats["funnel"]["scraped_by_source"] = {}
         source_count = 0    
@@ -844,6 +982,8 @@ def scrape_feeds(stats):
               
             if url in db_urls or title in db_titles:
                 stats["funnel"]["already_seen"] += 1
+                if url in rejected_urls or title in rejected_titles:
+                    stats["funnel"]["already_rejected"] = stats["funnel"].get("already_rejected", 0) + 1
                 continue
               
             article_time = time.time()
@@ -857,8 +997,12 @@ def scrape_feeds(stats):
                 published_at = datetime.datetime.fromtimestamp(min(article_time, current_time), datetime.timezone.utc).replace(tzinfo=None)
                   
             description = clean_description(entry.get('summary', '')) or title
-            if not is_quality_article(title, description, url): 
+            code_reason = quality_rejection_reason(title, description, url)
+            if code_reason:
                 stats["funnel"]["rejected_by_keywords"] += 1
+                by_rule = stats["funnel"].setdefault("rejected_by_rule", {})
+                by_rule[code_reason] = by_rule.get(code_reason, 0) + 1
+                logging.info(f"Відсіяно кодом [{code_reason}]: {title}")
                 continue
 
             # --- 1. ВЕКТОР (EMBEDDING) ДЛЯ СЕМАНТИЧНОГО ПОШУКУ ДУБЛІВ ---
@@ -898,6 +1042,7 @@ def scrape_feeds(stats):
 
             if is_semantic_duplicate:
                 stats["funnel"]["already_seen"] += 1
+                stats["funnel"]["semantic_duplicates"] = stats["funnel"].get("semantic_duplicates", 0) + 1
                 continue
 
             # --- 3. ЗАПИС НОВОЇ СТАТТІ ТА ЇЇ ВЕКТОРА ---
@@ -1641,6 +1786,12 @@ def main():
         "published": {"total": 0, "ukraine_priority": 0, "with_images": 0, "text_only": 0, "sources": {}},
         "errors_count": 0, "gemini_retries": 0
     }
+
+    # I-07: моделі, що не відповідали 2 запуски поспіль, — у кінець каскаду (пробна спроба раз на 3 год)
+    try:
+        apply_model_memory(stats, load_model_memory_rows())
+    except Exception as e:
+        logging.error(f"Помилка читання пам'яті про моделі (model_calls): {e}")
     
     try:
         scrape_feeds(stats)
