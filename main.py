@@ -786,6 +786,10 @@ def deduplicate_news(client, articles, recent_history=None, stats=None):
     
     history = recent_history[-75:] if recent_history else []
     prompt_data = [{"id": i, "title": a["title"], "description": a.get("description", "")} for i, a in enumerate(articles)]
+    # D-29: підказка «сірої зони» — лише для кандидатів, у яких вона є
+    for entry, a in zip(prompt_data, articles):
+        if a.get("similar_published"):
+            entry["similar_published"] = a["similar_published"]
     # Список кандидатів у лог — щоб бачити, що саме отримав фільтр
     titles_log = "\n".join([f"[{i}] {a['title']}" for i, a in enumerate(articles)])
     logging.info(f"📋 Кандидати на фільтрацію (Молдова):\n{titles_log}")
@@ -806,6 +810,7 @@ def deduplicate_news(client, articles, recent_history=None, stats=None):
     Порівняй залишених кандидатів зі списком <HISTORY>. Якщо "коренева подія" кандидата ВЖЕ згадувалася в історії — БЕЗЖАЛЬНО ВІДХИЛЯЙ кандидата. 
     Ми НЕ публікуємо "нові подробиці", "реакції влади" чи "продовження розслідування" вчорашніх подій. Це інформаційний шум. 
     (ЗАЛИШАЙ кандидатів з історією ТІЛЬКИ у випадку кардинальної розв'язки: наприклад, злочинця спіймали, суд виніс остаточний вирок, потерпілий помер). Кожного такого кандидата додай також у масив "updates" — система позначить його як оновлення.
+    Якщо в кандидата є поле "similar_published" — система знайшла вже опубліковану новину, дуже схожу за змістом ("title" — її заголовок, "similarity" — схожість від 0 до 1). ОБОВ'ЯЗКОВО порівняй з нею кореневу подію кандидата, навіть якщо вони написані різними мовами (румунська, російська, англійська). Якщо це та сама коренева подія — відхиляй як "Вже публікувалось". Схожість — лише підказка: різні події на одну тему не відхиляй.
 
     КРОК 4. СТОП-ТЕМИ (ЩО БЕЗЖАЛЬНО ВІДХИЛЯТИ): 
     1. СПОРТ: Будь-які матчі, турніри, результати, трансфери, спортсмени.
@@ -1135,6 +1140,43 @@ def conn_rollback(cursor):
     except Exception:
         pass
 
+# D-29 (11.11.2026, рішення власника): «сіра зона» векторної схожості. Та сама подія різними мовами
+# дає 0,85–0,90 і проходить векторний фільтр (поріг 0.90 у scrape_feeds). Для таких кандидатів фільтр
+# Gemini отримує підказку similar_published — найсхожіший опублікований пост за 3 дні.
+GREY_ZONE_MIN_SIMILARITY = 0.85
+
+def find_similar_published(cursor, guids, min_similarity=GREY_ZONE_MIN_SIMILARITY):
+    """D-29: {guid: {"title", "similarity"}} — найсхожіший опублікований ('sent') пост за 3 дні,
+    якщо схожість >= min_similarity. Кандидати без вектора в БД (напр., нові статті в DRY_RUN) — без підказки."""
+    if not guids:
+        return {}
+    try:
+        cursor.execute("""
+            SELECT c.guid, nn.title, nn.similarity
+            FROM articles c
+            CROSS JOIN LATERAL (
+                SELECT a.title, 1 - (a.embedding <=> c.embedding) AS similarity
+                FROM articles a
+                WHERE a.status = 'sent'
+                  AND a.created_at > NOW() - INTERVAL '3 days'
+                  AND a.embedding IS NOT NULL
+                  AND a.guid <> c.guid
+                ORDER BY a.embedding <=> c.embedding
+                LIMIT 1
+            ) nn
+            WHERE c.guid = ANY(%s) AND c.embedding IS NOT NULL
+        """, (list(guids),))
+        rows = cursor.fetchall()
+    except Exception as e:
+        logging.error(f"Помилка пошуку схожих опублікованих постів (D-29): {e}")
+        conn_rollback(cursor)
+        return {}
+    return {
+        guid: {"title": title, "similarity": round(float(sim), 2)}
+        for guid, title, sim in rows
+        if sim is not None and float(sim) >= min_similarity
+    }
+
 def process_backlog(stats):
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -1245,6 +1287,15 @@ def process_backlog(stats):
 
     cursor.execute("SELECT title FROM articles WHERE status = 'sent' ORDER BY created_at DESC LIMIT 75")
     recent_history_titles = [row[0] for row in cursor.fetchall()]
+
+    # D-29: підказка фільтру для кандидатів у «сірій зоні» схожості з опублікованими
+    similar = find_similar_published(cursor, [item['guid'] for item in candidate_batch])
+    for item in candidate_batch:
+        item.pop('similar_published', None)
+        if item['guid'] in similar:
+            item['similar_published'] = similar[item['guid']]
+    if similar:
+        logging.info(f"🔎 Сіра зона схожості (≥ {GREY_ZONE_MIN_SIMILARITY}): підказка для {len(similar)} кандидатів")
 
     # Зберігаємо ID всіх 40 новин, які ми відправили на перевірку
     evaluated_guids = {item['guid']: item for item in candidate_batch}
