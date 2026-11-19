@@ -134,6 +134,13 @@ UPDATE articles SET status = 'pending' WHERE status IN ('processing', 'failed')
   AND created_at > NOW() - INTERVAL '12 hours';
 ```
 
+### 5.4а Пости «не підтверджено» (`uncertain`, D-30)
+Telegram відповів 5xx або таймаутом — пост **міг вийти**. Бот його повторно не надсилає. Перевірте канал; якщо поста немає, поверніть у чергу:
+```sql
+SELECT guid, title, created_at FROM articles WHERE status = 'uncertain' ORDER BY created_at DESC;
+UPDATE articles SET status = 'pending' WHERE guid = '<guid>';
+```
+
 ### 5.5 Змінити модель Gemini
 Без правки коду:
 1. `python check_models.py` показує лише, які моделі **існують** для ключа, а не чи вони працюють і мають безкоштовну квоту. Реальна перевірка — workflow **«Check Gemini models»** (гілка `tools/check-gemini-models`; запускається push-ем у цю гілку): по одному запиту на модель, результат у Job Summary.

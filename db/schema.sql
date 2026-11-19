@@ -31,6 +31,8 @@ CREATE TABLE IF NOT EXISTS sources (
 --   processing -> обрано в партію на переклад/публікацію
 --   sent       -> опубліковано в канал
 --   failed     -> Telegram не прийняв повідомлення
+--   uncertain  -> Telegram не підтвердив відправку (5xx/таймаут), пост міг вийти;
+--                 повторно не надсилається (з 19.11.2026 — D-30)
 --   rejected   -> відхилено Gemini (причина в rejection_reason)
 --   expired    -> новині понад 12 годин від публікації на сайті
 --                 (COALESCE(published_at, created_at), з 30.10.2026 — D-14)

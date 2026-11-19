@@ -68,7 +68,7 @@ TRANSLATE_CHUNK_SIZE = 3
 # (503 / таймаут / квота — за таблицею model_calls).
 LITE_FALLBACK_AFTER_FAILED_RUNS = 3
 TRANSLATE_FALLBACK_MODEL = os.getenv('GEMINI_TRANSLATE_FALLBACK_MODEL') or "gemini-3.5-flash-lite"
-# Після стількох секунд від старту запуску нові частини перекладу не беремо (job: timeout-minutes 20)
+# Після стількох секунд від старту запуску нові частини перекладу і нові пости не беремо (job: timeout-minutes 20; D-30)
 RUN_TIME_BUDGET_SECONDS = 13 * 60
 RUN_STARTED = time.time()
 # Таймаут 180 с на запит: модель, що «зависла», не блокує запуск — каскад перейде до наступної
@@ -378,6 +378,10 @@ def build_analytics_message(stats, tokens):
         lines.append(f"🆘 Резерв {TRANSLATE_FALLBACK_MODEL} для перекладу: {LITE_FALLBACK_AFTER_FAILED_RUNS} запуски поспіль без перекладу")
     if stats.get('translation_deferred'):
         lines.append(f"⏸ Переклад відкладено: {stats['translation_deferred']} новин лишились у черзі (flash-моделі недоступні)")
+    if published.get('uncertain'):
+        lines.append(f"❓ Telegram не підтвердив відправку: {published['uncertain']} (пост міг вийти — перевірте канал; повторно не надсилались)")
+    if stats.get('send_deferred'):
+        lines.append(f"⏱ Ліміт часу запуску: {stats['send_deferred']} перекладених новин не надіслано, лишились у черзі")
     lines += ["", f"🤖 <b>Моделі:</b> {esc(models_str)}"]
     if EXHAUSTED_MODELS:
         lines.append(f"⛽ Квоту вичерпано: {esc(', '.join(sorted(EXHAUSTED_MODELS)))}")
@@ -718,15 +722,30 @@ def _mask_token(s):
     return str(s).replace(TELEGRAM_BOT_TOKEN, '***') if TELEGRAM_BOT_TOKEN else str(s)
 
 class TelegramRetryableError(Exception):
-    """Тимчасова помилка Telegram (мережа, 429, 5xx) — є сенс повторити."""
+    """Запит точно не дійшов до Telegram (немає з'єднання) або 429 — є сенс повторити."""
+
+class TelegramUncertainError(Exception):
+    """D-30: Telegram міг уже опублікувати повідомлення (5xx, таймаут читання, обрив з'єднання під час запиту).
+    Не повторюємо і не шлемо текстом — інакше в каналі дублі (інцидент 19.11.2026)."""
+
+# Обрив уже встановленого з'єднання — запит міг дійти до Telegram
+_SENT_MAYBE_MARKERS = ('Connection aborted', 'RemoteDisconnected', 'Connection reset')
 
 def _post_telegram(api_url, payload):
     try:
         return requests.post(api_url, data=payload, timeout=60)
-    except requests.RequestException as e:
+    except requests.ConnectTimeout as e:
         raise TelegramRetryableError(f"Мережева помилка Telegram: {_mask_token(e)}")
+    except requests.ConnectionError as e:
+        if any(m in str(e) for m in _SENT_MAYBE_MARKERS):
+            raise TelegramUncertainError(f"Мережева помилка Telegram: {_mask_token(e)}")
+        raise TelegramRetryableError(f"Мережева помилка Telegram: {_mask_token(e)}")
+    except requests.RequestException as e:
+        # ReadTimeout та інше: запит відправлено, відповіді не дочекались
+        raise TelegramUncertainError(f"Мережева помилка Telegram: {_mask_token(e)}")
 
-# D-16: повторюємо лише тимчасові помилки; 4xx (погане фото тощо) — одразу у фолбек
+# D-16: повторюємо лише тимчасові помилки; 4xx (погане фото тощо) — одразу у фолбек.
+# D-30: повтор — лише коли запит точно не дійшов (немає з'єднання) і на 429; 5xx/таймаут — TelegramUncertainError без повтору.
 @retry(stop=stop_after_attempt(4), wait=wait_exponential(multiplier=2, min=3, max=30),
        retry=retry_if_exception_type(TelegramRetryableError), reraise=True)
 def execute_telegram_request(api_url, payload):
@@ -759,7 +778,7 @@ def execute_telegram_request(api_url, payload):
         time.sleep(retry_after)
         raise TelegramRetryableError(f"Telegram 429: {resp.text[:200]}")
     if resp.status_code >= 500:
-        raise TelegramRetryableError(f"Telegram {resp.status_code}: {resp.text[:200]}")
+        raise TelegramUncertainError(f"Telegram {resp.status_code}: {resp.text[:200]}")
     raise Exception(f"Telegram Error {resp.status_code}: {resp.text[:300]}")
 
 def normalize_reason(raw):
@@ -1393,6 +1412,7 @@ def process_backlog(stats):
             logging.error(f"Помилка повернення статусу в БД: {db_err}")
 
     # Переклад частинами по TRANSLATE_CHUNK_SIZE: якщо частина не перекладена — вона й решта партії лишаються в черзі
+    time_is_up = False
     for start in range(0, len(batch), TRANSLATE_CHUNK_SIZE):
         chunk = batch[start:start + TRANSLATE_CHUNK_SIZE]
         rest_guids = batch_guids[start:]
@@ -1420,10 +1440,27 @@ def process_backlog(stats):
 
         for idx, item in enumerate(chunk):
             if idx >= len(generated_texts): break 
+            # D-30: ліміт часу і перед кожним постом — щоб GitHub не вбив запуск (тоді немає звіту, стаття лишається 'processing')
+            if time.time() - RUN_STARTED > RUN_TIME_BUDGET_SECONDS:
+                left_guids = batch_guids[start + idx:]
+                logging.warning(f"⏱ Запуск триває понад {RUN_TIME_BUDGET_SECONDS // 60} хв — решта постів ({len(left_guids)}) лишається в черзі")
+                stats["send_deferred"] = len(left_guids)
+                return_to_pending(left_guids)
+                time_is_up = True
+                break
             
             images = item.get('image_urls', [])
             post_text = apply_update_prefix(generated_texts[idx], item.get('is_update', False))
-            if send_to_telegram(post_text, item['url'], item.get('source', 'Джерело'), images):
+            sent = send_to_telegram(post_text, item['url'], item.get('source', 'Джерело'), images)
+            if sent == SEND_UNCERTAIN:
+                stats["errors_count"] += 1
+                stats["published"]["uncertain"] = stats["published"].get("uncertain", 0) + 1
+                try:
+                    cursor.execute("UPDATE articles SET status = 'uncertain' WHERE guid = %s", (item['guid'],))
+                    conn.commit()
+                except Exception as db_err:
+                    logging.error(f"Помилка оновлення статусу uncertain в БД: {db_err}")
+            elif sent:
                 try:
                     cursor.execute("UPDATE articles SET status = 'sent' WHERE guid = %s", (item['guid'],))
                     conn.commit()
@@ -1446,6 +1483,8 @@ def process_backlog(stats):
                     conn.commit()
                 except Exception as db_err:
                     logging.error(f"Помилка оновлення статусу failed в БД: {db_err}")
+        if time_is_up:
+            break
 
     cursor.close()
     conn.close()
@@ -1566,6 +1605,10 @@ def visible_len(html_text):
     """Довжина тексту так, як її рахує Telegram (без HTML-тегів, сутності — один символ)."""
     return len(html_lib.unescape(re.sub(r'<[^>]+>', '', html_text or '')))
 
+# D-30: результат send_to_telegram, коли Telegram не підтвердив відправку (пост міг уже вийти).
+# Стаття отримує статус 'uncertain' і більше не надсилається.
+SEND_UNCERTAIN = 'uncertain'
+
 def send_to_telegram(text, url, source_name, image_urls=None):
     # 1. ХЕШТЕГИ В КІНЦІ ТЕКСТУ (D-22): беремо лише самі хештеги, а не весь останній абзац —
     # модель інколи ставить їх з нового рядка без порожнього рядка, і тоді «абзацом» ставав увесь текст
@@ -1628,6 +1671,10 @@ def send_to_telegram(text, url, source_name, image_urls=None):
     # 4. ВІДПРАВКА ТА ЗАХИСТ ВІД ЗЛАМАНОГО HTML
     try: 
         return execute_telegram_request(api_url, payload)
+    except TelegramUncertainError as e:
+        # D-30: пост міг уже вийти — без повтору і без текстового фолбеку
+        logging.warning(f"❓ Telegram не підтвердив відправку, пост міг уже вийти ({e}). Повторно не надсилаємо")
+        return SEND_UNCERTAIN
     except Exception as e: 
         # ФОЛБЕК: Якщо відхилено фото/медіагрупу, відправляємо як голий текст
         if len(image_urls) > 0:
@@ -1636,6 +1683,9 @@ def send_to_telegram(text, url, source_name, image_urls=None):
             api_url_text = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
             try:
                 return execute_telegram_request(api_url_text, payload_text)
+            except TelegramUncertainError as text_e:
+                logging.warning(f"❓ Telegram не підтвердив відправку тексту, пост міг уже вийти ({text_e}). Повторно не надсилаємо")
+                return SEND_UNCERTAIN
             except Exception as text_e:
                 logging.error(f"❌ Критична помилка відправки тексту: {text_e}")
                 return False
@@ -1737,12 +1787,13 @@ def build_weekly_report(cursor, days=WEEKLY_REPORT_DAYS, on_demand=False):
         extra = []
         if v.get('rejected'): extra.append(f"відхилено {v['rejected']}")
         if v.get('failed'): extra.append(f"не надіслано {v['failed']}")
+        if v.get('uncertain'): extra.append(f"не підтверджено {v['uncertain']}")
         sent_n = v.get('sent', 0)
         photo_part = f" (фото {_pct(v.get('photos', 0), sent_n)})" if sent_n else ""
         lines.append(f"▪️ {esc(name)} — {sent_n}{photo_part}{', ' + ', '.join(extra) if extra else ''}")
     total = sum(by_status.values())
     lines.append(f"📦 Зібрано {total} | відхилено {by_status.get('rejected', 0)} | застаріли {by_status.get('expired', 0)}"
-                 f" | не надіслано {by_status.get('failed', 0)} | у черзі {by_status.get('pending', 0) + by_status.get('processing', 0)}")
+                 f" | не надіслано {by_status.get('failed', 0)} | не підтверджено {by_status.get('uncertain', 0)} | у черзі {by_status.get('pending', 0) + by_status.get('processing', 0)}")
     lines.append("")
 
     rejected_total = sum(reasons.values())
